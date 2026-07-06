@@ -11,6 +11,9 @@
 
 .pio_version	1
 
+.define	public	GPIO_TRACE_RD	20	; Debugging
+.define	public	GPIO_TRACE_WR	21	; Debugging
+
 .define	public	GPIO_E		25	; E clock (input, supplied by host)
 .define	public	GPIO_Q		26	; Q clock (input, supplied by host)
 
@@ -18,8 +21,6 @@
 .define	public	GPIO_A_BASE	28	; A2-0
 .define	public	GPIO_D_BASE	31	; D7-0 (must sit immediately above A2-0: the write SM reads RW+A+D as one contiguous field)
 .define	public	GPIO_CS		39	; !CS_PICO (above the D block, outside the contiguous RW+A+D field)
-.define	public	GPIO_TRACE_RD	20	; Debugging
-.define	public	GPIO_TRACE_WR	21	; Debugging
 
 ; Bus READ cycle. The read_registers[] prefix + A2-0 are sent to the
 ; DMA read chain as soon as Q goes high. The byte at the given address is

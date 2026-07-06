@@ -36,33 +36,24 @@ registers::copy_in(uint16_t addr, const uint8_t *src, uint16_t len)
 void
 registers::dump()
 {
-	static uint8_t printables[17]; // Include the decorative bar down the middle
+	// One row of register_length (8) bytes per block, addressed from
+	// REGISTER_BASE. The trailing byte leaves room for the ascii gutter.
+	static uint8_t printables[register_length + 1u];
 
-	printf("Write block:\n");
-	for (uint16_t i = 0u; i < 4u; i++) {
-		copy_out_write(printables, i*16u, 16u);
-		printf("%04X:", REGISTER_BASE + i*16u);
-		for (uint16_t j = 0u; j < 16u; j++) {
+	auto print_block = [](const char *label,
+	                      void (*fetch)(uint8_t *, uint16_t, uint16_t)) {
+		fetch(printables, 0u, register_length);
+		printf("%s\n%04X:", label, REGISTER_BASE);
+		for (uint16_t j = 0u; j < register_length; j++) {
 			auto ch = static_cast<unsigned char>(printables[j]) & 0x7F;
 			printf(" %02X", printables[j]);
-			if (j == 7u)
-				printf(" ");
 			printables[j] = std::isprint(ch) ? static_cast<char>(ch) : '.';
 		}
-		printf(" |%.8s|%.8s|\n", reinterpret_cast<char *>(printables), reinterpret_cast<char *>(printables + 8));
-	}
-	printf("Read block:\n");
-	for (uint16_t i = 0u; i < 4u; i++) {
-		copy_out(printables, i*16u, 16u);
-		printf("%04X:", static_cast<uint16_t>(REGISTER_BASE + i*16u));
-		for (uint16_t j = 0u; j < 16u; j++) {
-			auto ch = static_cast<unsigned char>(printables[j]) & 0x7F;
-			printf(" %02X", printables[j]);
-			if (j == 7u)
-				printf(" ");
-			printables[j] = std::isprint(ch) ? static_cast<char>(ch) : '.';
-		}
-		printf(" |%.8s|%.8s|\n", reinterpret_cast<char *>(printables), reinterpret_cast<char *>(printables + 8));
-	}
+		printf(" |%.*s|\n", static_cast<int>(register_length),
+		       reinterpret_cast<char *>(printables));
+	};
+
+	print_block("Write block:", copy_out_write);
+	print_block("Read block:", copy_out);
 	printf("--\n");
 }

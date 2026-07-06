@@ -17,24 +17,25 @@ extern volatile bool verbose;
 #include "hardware/pio.h"
 
 // === Pin map ===
-// The fast/timing-critical pins (E, Q, R/!W, A2-0, D7-0, !CS) are owned by the
-// PIO bus programs and defined in pico_thing_video.pio (exported via pico_thing_video.pio.h):
+enum {
+	// Default assignment
+	GPIO_UART_TX = 0,	// [o]  RP2xxx UART Tx (console)
+	GPIO_UART_RX = 1,	// [i]  RP2xxx UART Rx (console)
+
+	// Host reset, observed (input)
+	GPIO_RESET   = 23,	// [i]  !RESET
+
+	// Interrupt back to the host CPU
+	GPIO_IRQ     = 24,	// [o*] !IRQ (simulated open-collector)
+
+	// The fast/timing-critical pins (E, Q, R/!W, A2-0, D7-0, !CS) are owned by the
+	// PIO bus programs and defined in pico_thing_video.pio (exported via pico_thing_video.pio.h):
 //	GPIO_E       = 25	// [i]  E clock (supplied by host)
 //	GPIO_Q       = 26	// [i]  Q clock (supplied by host)
 //	GPIO_RW      = 27	// [i]  Bus R/!W
 //	GPIO_A_BASE  = 28	// [i]  Address bus, 3 pins (A2-0)
 //	GPIO_D_BASE  = 31	// [io] Data bus, 8 pins (D7-0)
 //	GPIO_CS      = 39	// [i]  Device !CS (above the D block)
-enum {
-	// Default assignment
-	GPIO_UART_TX = 0,	// [o]  RP2xxx UART Tx (console)
-	GPIO_UART_RX = 1,	// [i]  RP2xxx UART Rx (console)
-
-	// Interrupt back to the host CPU
-	GPIO_IRQ     = 24,	// [o*] !IRQ (simulated open-collector)
-
-	// Host reset, observed (input)
-	GPIO_RESET   = 23,	// [i]  !RESET
 };
 
 // !RESET is active-low and an INPUT: the host drives it, we observe it.
