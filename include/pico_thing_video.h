@@ -58,6 +58,8 @@ struct pio_dma {
 
 // === Device address window ===
 // The Pico exposes an 8-byte register window (see registers.h) that the host
-// 6809 reads and writes.
-#define REGISTER_BASE	uint16_t(0xFFC0u)
+// 6809 reads and writes. External glue decodes the guest address and asserts
+// !CS over $FF10-$FF17; the Pico itself only sees !CS and A2-0, so REGISTER_BASE
+// is just the label used by the register dump, not a value the bus path decodes.
+#define REGISTER_BASE	uint16_t(0xFF10u)
 #define ADDRESS(index)	uint16_t(REGISTER_BASE + index)

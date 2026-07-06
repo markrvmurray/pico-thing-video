@@ -21,11 +21,13 @@ A video processor and USB-host keyboard/mouse are planned on top of this base.
 
 ## Register window
 
-The Pico exposes an **8-byte register window at guest `$FFC0`–`$FFC7`** (see
-`include/registers.h`). Reads and writes to the same offset can map to separate
-host-side buffers (`read_registers[]` / `write_registers[]`), allowing read-only
-enforcement. Device sub-registers (video, keyboard, mouse) will be laid out in
-this window as they are added.
+The Pico exposes an **8-byte register window at guest `$FF10`–`$FF17`** (see
+`include/registers.h`). External address-decode glue asserts `!CS` over that
+range; the Pico sees only `!CS` and A2–A0, so the base address lives in the
+decoder, not the firmware. Reads and writes to the same offset can map to
+separate host-side buffers (`read_registers[]` / `write_registers[]`), allowing
+read-only enforcement. Device sub-registers (video, keyboard, mouse) will be
+laid out in this window as they are added.
 
 ## Pin map
 

@@ -6,7 +6,7 @@
  * Pico2 (RP2350) firmware acting as a slave peripheral on an external
  * MC6809E bus. The host system supplies the E/Q clocks and drives the
  * address/data bus; this Pico watches its !CS and services byte reads and
- * writes to a 64-byte register window at $FFC0. A video processor and USB
+ * writes to an 8-byte register window at $FF10. A video processor and USB
  * host (keyboard/mouse) will be layered on top of this window later.
  */
 
