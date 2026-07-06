@@ -1,0 +1,163 @@
+;
+; Copyright (c) 2025 Mark R V Murray.
+;
+; SPDX-License-Identifier: BSD-2-Clause
+;
+; This Pico is a slave peripheral on an external MC6809E bus. The host
+; system supplies E and Q; here they are sampled as plain GPIO inputs.
+; Only two state machines survive: the byte-read responder and the
+; byte-write capturer, both gated on the device !CS.
+;
+
+.pio_version	1
+
+.define	public	GPIO_E		0	; E clock (input, supplied by host)
+.define	public	GPIO_Q		1	; Q clock (input, supplied by host)
+
+.define	public	GPIO_RW		2	; R/!W
+.define	public	GPIO_A_BASE	3	; A5-0
+.define	public	GPIO_D_BASE	9	; D7-0
+.define	public	GPIO_CS		17	; !CS_PICO
+.define	public	GPIO_TRACE_RD	27	; Debugging
+.define	public	GPIO_TRACE_WR	28	; Debugging
+
+; Bus READ cycle. The read_registers[] prefix + A5-0 are sent to the
+; DMA read chain as soon as Q goes high. The byte at the given address is
+; returned immediately to here, where we can take our time by sending
+; to D7-0 after Q trailing edge. The output is cleared at E trailing edge
+; (plus a bit).
+;
+; To consider: Don't auto-return the read byte ASAP, instead give the
+; Pico a chance to decide what to send.
+;
+; IN  pins:    (7) A5-0, R/!W
+; OUT pins:    (8) D7-0
+; JMP pin:     !CS
+.program	mc6809_bus_read
+.side_set	1			; Debugging
+; =========================================================
+	pull	block		side 0	; Get read_registers[] address (MSBs only) at startup
+	mov	y osr		side 0
+.wrap_target
+wait_q:
+	wait	0 gpio GPIO_Q	side 0  ; Wait for new Q cycle
+	wait	1 gpio GPIO_Q	side 0
+	jmp	pin wait_q	side 0	; If !CS (jmp_pin) is high, try again next cycle
+	in	pins 7		side 1	; R/!W, A5-0 all stable at Q rising edge
+	in	null 25		side 1	; Move A5-0, R/!W to the right
+	mov	osr isr		side 1
+	out	x 1		side 1	; Get R/!W
+	jmp	!x wait_q	side 1	; If R/!W == 0 -> Write
+	mov	x isr		side 1	; Get back A5-0, R/!W
+	in	x 7		side 1
+	mov	x y		side 1  ; Get registers[] address
+	in	x 26		side 1  ; MSBs of registers[], R/!W falls off the end
+	push	block		side 1	; Send full address = registers[] + A5-0
+	pull	block		side 1	; Wait for data byte reply
+	out	pins 8		side 0	; Set D7-0 output values
+	wait	0 gpio GPIO_Q	side 0	; Q trailing edge
+	mov	pindirs !null	side 1	; Set D7-0 to output
+	wait	0 gpio GPIO_E	[7] side 1	; E trailing edge plus a bit
+	mov	pindirs null	side 0	; Set D7-0 back to input
+.wrap
+
+% c-sdk {
+
+static inline void
+mc6809_bus_read_program_init(PIO pio, uint sm, uint offset)
+{
+	for (uint i = 0; i < 8; i++)
+		pio_gpio_init(pio, GPIO_D_BASE + i);
+	pio_sm_set_consecutive_pindirs(pio, sm, GPIO_D_BASE, 8, false);
+	pio_gpio_init(pio, GPIO_TRACE_RD);
+	pio_sm_set_consecutive_pindirs(pio, sm, GPIO_TRACE_RD, 1, true);
+	pio_sm_config c = mc6809_bus_read_program_get_default_config(offset);
+	sm_config_set_in_pins(&c, GPIO_RW);
+	sm_config_set_in_shift(&c, true, false, 32);	// Right shift!!
+	sm_config_set_out_pins(&c, GPIO_D_BASE, 8);
+	sm_config_set_out_shift(&c, true, false, 32);	// Right shift!!
+	sm_config_set_jmp_pin(&c, GPIO_CS);
+	sm_config_set_sideset_pins(&c, GPIO_TRACE_RD);
+	pio_sm_init(pio, sm, offset, &c);
+	// pio_sm_set_enabled(pio, sm, false); // We'll start this when DMA, the IRQ's and the second core get going.
+}
+
+static inline void
+mc6809_bus_read_program_deinit(PIO pio, uint sm)
+{
+	pio_sm_set_enabled(pio, sm, false);
+	// D7-0 back to hi-Z input
+	pio_sm_set_consecutive_pindirs(pio, sm, GPIO_D_BASE, 8, false);
+	for (uint i = 0; i < 8; i++)
+		gpio_set_function(GPIO_D_BASE + i, GPIO_FUNC_SIO);
+	// Trace pin low then hi-Z
+	gpio_put(GPIO_TRACE_RD, false);
+	gpio_set_dir(GPIO_TRACE_RD, GPIO_IN);
+	gpio_set_function(GPIO_TRACE_RD, GPIO_FUNC_SIO);
+	pio_sm_unclaim(pio, sm);
+}
+
+%}
+
+; Bus WRITE cycle. The write_registers[] prefix + A5-0 are sent to the
+; DMA chain as soon as Q goes high. As soon as E goes high, we grab D7-0
+; and send this back to the DMA chain for storage at the given address.
+;
+; IN pins: (7) A5-0, R/!W
+; IN pins: (8) D7-0
+; JMP pin: !CS
+.program	mc6809_bus_write
+.side_set	1			; Debugging
+; =========================================================
+	pull	block		side 0	; Get registers[] address (MSBs only) at startup
+	mov	y osr		side 0
+.wrap_target
+wait_q:
+	wait	0 gpio GPIO_Q	side 0  ; Wait for new Q cycle
+	wait	1 gpio GPIO_Q	side 0
+	jmp	pin wait_q	side 0	; If !CS (jmp_pin) is high, try again next cycle
+	in	pins 7		side 1	; A5-0, R/!W all stable at Q rising edge
+	in	null 25		side 1	; Move A5-0, R/!W to the right
+	mov	osr isr		side 1
+	out	x 1		side 1	; Get R/!W
+	jmp	x-- wait_q	side 1	; If R/!W == 1 -> Read
+	mov	x isr		side 1	; Get back A5-0, R/!W
+	in	x 7		side 1
+	mov	x y		side 1  ; Get registers[] address
+	in	x 26		side 1  ; MSBs of registers[], R/!W falls off the end
+	push	block		side 1	; Send full address = registers[] + A5-0
+	wait	1 gpio GPIO_E	side 0	; E leading edge
+	in	pins 15		side 1	; Get D7-0, A5-0, R/!W
+	in	null 24		side 1	; Get D7-0 to the right; A5-0 + R/!W fall of the end
+	push	block		side 1	; Send D7-0
+.wrap
+
+% c-sdk {
+
+static inline void
+mc6809_bus_write_program_init(PIO pio, uint sm, uint offset)
+{
+	pio_gpio_init(pio, GPIO_TRACE_WR);
+	pio_sm_set_consecutive_pindirs(pio, sm, GPIO_TRACE_WR, 1, true);
+	pio_sm_config c = mc6809_bus_write_program_get_default_config(offset);
+	sm_config_set_in_pins(&c, GPIO_RW);
+	sm_config_set_in_shift(&c, true, false, 32);	// Right shift!!
+	sm_config_set_out_shift(&c, true, false, 32);	// Right shift!!
+	sm_config_set_jmp_pin(&c, GPIO_CS);
+	sm_config_set_sideset_pins(&c, GPIO_TRACE_WR);
+	pio_sm_init(pio, sm, offset, &c);
+	// pio_sm_set_enabled(pio, sm, false); // We'll start this when DMA, the IRQ's and the second core get going.
+}
+
+static inline void
+mc6809_bus_write_program_deinit(PIO pio, uint sm)
+{
+	pio_sm_set_enabled(pio, sm, false);
+	// Trace pin low then hi-Z
+	gpio_put(GPIO_TRACE_WR, false);
+	gpio_set_dir(GPIO_TRACE_WR, GPIO_IN);
+	gpio_set_function(GPIO_TRACE_WR, GPIO_FUNC_SIO);
+	pio_sm_unclaim(pio, sm);
+}
+
+%}

@@ -1,0 +1,42 @@
+.idea
+
+build
+cmake-*
+compile_commands.json
+
+.DS_Store
+.cache
+
+### C++ template
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# LLM
+CLAUDE.md
+.claude
