@@ -224,31 +224,12 @@ process_command(char *buf)
 
 	switch (cmd.tag) {
 
-	case CMD_POWER:
-		printf("Power is %s\n", POWER_IS_ASSERTED ? "on" : "off");
-		break;
-
-	case CMD_POWER_ON:
-		if (POWER_IS_ASSERTED)
-			printf("Power is already on\n");
-		else
-			set_power();
-		break;
-
-	case CMD_POWER_OFF:
-		if (!POWER_IS_ASSERTED)
-			printf("Power is already off\n");
-		else
-			reset_power();
-		break;
-
 	case CMD_VERBOSE:
 		verbose = !verbose;
 		printf("Verbose mode %s\n", verbose ? "on" : "off");
 		break;
 
 	case CMD_STATUS:
-		printf("Power:       %s\n", POWER_IS_ASSERTED ? "on" : "off");
 		printf("Verbose:     %s\n", verbose ? "on" : "off");
 		printf("!RESET:      %s\n", RESET_IS_ASSERTED ? "asserted" : "released");
 		printf("!IRQ:        %s\n", IRQ_IS_ASSERTED ? "asserted" : "released");
@@ -379,7 +360,7 @@ __no_inline_not_in_flash_func(main_core1)()
 	irq_set_enabled(piodma_read.irq, true);
 	dma_channel_set_irq0_enabled(piodma_read.data_channel, true);
 	dma_channel_start(piodma_read.address_channel);
-	pio_sm_put(piodma_read.pio, piodma_read.sm, registers::read_address() >> 6); // Six bits for A0-5
+	pio_sm_put(piodma_read.pio, piodma_read.sm, registers::read_address() >> 3); // Three bits for A0-2
 	printf("Core1 read DMA chain configured\n");
 
 	irq_set_exclusive_handler(piodma_write.irq, dma_bus_write_irq_handler);
@@ -387,7 +368,7 @@ __no_inline_not_in_flash_func(main_core1)()
 	irq_set_enabled(piodma_write.irq, true);
 	dma_channel_set_irq1_enabled(piodma_write.data_channel, true);
 	dma_channel_start(piodma_write.address_channel);
-	pio_sm_put(piodma_write.pio, piodma_write.sm, registers::write_address() >> 6); // Six bits for A0-5
+	pio_sm_put(piodma_write.pio, piodma_write.sm, registers::write_address() >> 3); // Three bits for A0-2
 	printf("Core1 write DMA chain configured\n");
 
 	pio_sm_set_enabled(piodma_read.pio, piodma_read.sm, true);
@@ -447,8 +428,8 @@ bus_pio_dma_init()
 	gpio_init(GPIO_Q);
 	gpio_set_dir(GPIO_Q, GPIO_IN);
 
-	init_pins_range(GPIO_A_BASE, 6); // A0..5 inputs
-	gpio_set_dir_in_masked(0b111111u << GPIO_A_BASE);
+	init_pins_range(GPIO_A_BASE, 3); // A0..2 inputs
+	gpio_set_dir_in_masked(0b111u << GPIO_A_BASE);
 
 	gpio_init(GPIO_RW);
 	gpio_set_dir(GPIO_RW, GPIO_IN);
@@ -645,11 +626,7 @@ set_power()
 	// disconnected line reads released (the signal is active-low).
 	gpio_init(GPIO_RESET);
 	gpio_set_dir(GPIO_RESET, GPIO_IN);
-	gpio_pull_up(GPIO_RESET);
-
-	POWER_ASSERT;
-	// 0.25s should be enough for power to stabilise
-	sleep_ms(250u);
+	// gpio_pull_up(GPIO_RESET);
 
 	bus_pio_dma_init();
 	peripheral_clear();
@@ -673,7 +650,6 @@ reset_power()
 	// Release the interrupt line and remove power
 	gpio_put(GPIO_IRQ, false);
 	DEASSERT_IRQ;
-	POWER_DEASSERT;
 	printf("Core0 powered down\n");
 }
 
@@ -706,11 +682,6 @@ main()
 
 	usb_init();
 	printf("Core0 initialised USB\n");
-
-	// Enable external electronics' power and bring up the bus engine
-	gpio_init(GPIO_POWER);
-	gpio_set_dir(GPIO_POWER, GPIO_OUT);
-	set_power();
 
 	tm tm = build_time_tm();
 	aon_timer_stop();

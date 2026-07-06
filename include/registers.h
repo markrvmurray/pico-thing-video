@@ -12,17 +12,17 @@
 
 #include "pico.h"
 
-// 64-byte memory-mapped registers
+// 8-byte memory-mapped registers
 // There are 2 blocks, one for the Read DMA and the other for the Write DMA.
 // This allows for software enforcement of read-only areas and for device
 // registers to share status and control at the same address.
-// The alignment is there to allow the base address to have the lower 6 bits
+// The alignment is there to allow the base address to have the lower 3 bits
 // all zeroes, so that the rest can be used as DMA prefixes without faffing
 // around with pointer arithmetic.
 
 class registers {
 public:
-	static constexpr uint16_t register_address_bits = 6u;
+	static constexpr uint16_t register_address_bits = 3u;
 	static constexpr uint16_t register_length = 1u << register_address_bits;
 	static constexpr uint16_t register_mask = register_length - 1u;
 
