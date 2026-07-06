@@ -57,7 +57,7 @@ needed.
 
 ## Debugging
 
-OpenOCD with `openocd_pico.cfg` or `pico-debug.cfg`. Serial console is on the
+OpenOCD with `openocd_pico.cfg` (or `pico.cfg`). Serial console is on the
 UART (GPIO 30/31, 115200 baud) and USB CDC. `rp2350.svd` is included for
 register inspection in the debugger.
 
