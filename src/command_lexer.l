@@ -74,7 +74,6 @@ static int
 match_command_keyword(const char *text)
 {
 	static const struct { const char *name; const char *alias; int tok; } kw[] = {
-		{ "power",   "pw", TOK_POWER   },
 		{ "verbose", "vb", TOK_VERBOSE },
 		{ "status",  "st", TOK_STATUS  },
 		{ "examine", "ex", TOK_EXAMINE },
@@ -105,10 +104,6 @@ match_command_keyword(const char *text)
 
 	/* ---- Whitespace: skip ---- */
 [ \t\r\n]+          { /* skip */ }
-
-	/* ---- Subcommand keywords (exact, case-insensitive) ---- */
-[Oo][Nn]                            { return TOK_ON; }
-[Oo][Ff][Ff]                        { return TOK_OFF; }
 
 	/* ---- Hex/decimal numbers (including pure decimal) ---- */
 	/* pool_tok() copies yytext so the string survives subsequent yylex() calls */

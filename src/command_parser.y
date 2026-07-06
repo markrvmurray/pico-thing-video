@@ -80,17 +80,12 @@ static int      _byte_count;
  * ----------------------------------------------------------------------- */
 
 /* Command keywords */
-%token TOK_POWER
 %token TOK_VERBOSE
 %token TOK_STATUS
 %token TOK_EXAMINE
 %token TOK_MODIFY
 %token TOK_FILL
 %token TOK_USB
-
-/* Subcommand keywords */
-%token TOK_ON
-%token TOK_OFF
 
 /* Value tokens */
 %token <str>  TOK_NUMBER
@@ -107,8 +102,7 @@ start:
   ;
 
 command:
-	  power_cmd
-	| verbose_cmd
+	  verbose_cmd
 	| status_cmd
 	| examine_cmd
 	| modify_cmd
@@ -120,12 +114,6 @@ command:
 /* -----------------------------------------------------------------------
  * Simple no-argument commands
  * ----------------------------------------------------------------------- */
-power_cmd:
-	  TOK_POWER          { result->tag = CMD_POWER; }
-	| TOK_POWER TOK_ON   { result->tag = CMD_POWER_ON; }
-	| TOK_POWER TOK_OFF  { result->tag = CMD_POWER_OFF; }
-	;
-
 verbose_cmd:
 	TOK_VERBOSE { result->tag = CMD_VERBOSE; }
 	;
@@ -139,17 +127,17 @@ examine_cmd:
 	;
 
 /* -----------------------------------------------------------------------
- * modify <offset> <byte> [<byte> ...]   (1..64 bytes)
+ * modify <offset> <byte> [<byte> ...]   (offset 0..7, 1..8 bytes)
  * ----------------------------------------------------------------------- */
 modify_cmd:
 	TOK_MODIFY TOK_NUMBER { _byte_count = 0; } byte_list_ne {
 		uint32_t s = parse_hex($2);
-		if (s == UINT32_MAX || s > 0x3Fu) {
-			printf("Invalid hex offset '%s' (valid: 0 .. 3F)\n", $2);
+		if (s == UINT32_MAX || s > 0x7u) {
+			printf("Invalid hex offset '%s' (valid: 0 .. 7)\n", $2);
 			YYERROR;
 		}
-		if (_byte_count > 64) {
-			printf("Too many bytes (maximum 64)\n");
+		if (_byte_count > 8) {
+			printf("Too many bytes (maximum 8)\n");
 			YYERROR;
 		}
 		result->tag          = CMD_MODIFY;

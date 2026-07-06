@@ -40,61 +40,54 @@ run(const std::string &line)
 
 TEST_CASE("no-argument commands map to their tags", "[parser]")
 {
-	CHECK(run("power").cmd.tag   == CMD_POWER);
 	CHECK(run("verbose").cmd.tag == CMD_VERBOSE);
 	CHECK(run("status").cmd.tag  == CMD_STATUS);
 	CHECK(run("examine").cmd.tag == CMD_EXAMINE);
 
-	CHECK(run("power").ok);
+	CHECK(run("verbose").ok);
 	CHECK(run("status").ok);
-}
-
-TEST_CASE("power on / off subcommands", "[parser]")
-{
-	CHECK(run("power on").cmd.tag  == CMD_POWER_ON);
-	CHECK(run("power off").cmd.tag == CMD_POWER_OFF);
-	CHECK(run("power on").ok);
-	CHECK(run("power off").ok);
 }
 
 TEST_CASE("two-letter aliases resolve to the same tags", "[parser]")
 {
-	CHECK(run("pw").cmd.tag     == CMD_POWER);
 	CHECK(run("vb").cmd.tag     == CMD_VERBOSE);
 	CHECK(run("st").cmd.tag     == CMD_STATUS);
 	CHECK(run("ex").cmd.tag     == CMD_EXAMINE);
 	CHECK(run("mo 0 1").cmd.tag == CMD_MODIFY);
 	CHECK(run("fi").cmd.tag     == CMD_FILL);
 	CHECK(run("ub reset").cmd.tag == CMD_USB);
-
-	CHECK(run("pw on").cmd.tag  == CMD_POWER_ON);
-	CHECK(run("pw off").cmd.tag == CMD_POWER_OFF);
 }
 
-TEST_CASE("keywords and on/off are case-insensitive", "[parser]")
+TEST_CASE("keywords are case-insensitive", "[parser]")
 {
-	CHECK(run("POWER").cmd.tag   == CMD_POWER);
+	CHECK(run("STATUS").cmd.tag  == CMD_STATUS);
 	CHECK(run("Status").cmd.tag  == CMD_STATUS);
 	CHECK(run("Verbose").cmd.tag == CMD_VERBOSE);
-	CHECK(run("PW ON").cmd.tag   == CMD_POWER_ON);
-	CHECK(run("power Off").cmd.tag == CMD_POWER_OFF);
+	CHECK(run("EXAMINE").cmd.tag == CMD_EXAMINE);
+}
+
+TEST_CASE("power / on / off are no longer commands", "[parser]")
+{
+	CHECK_FALSE(run("power").ok);
+	CHECK_FALSE(run("power on").ok);
+	CHECK_FALSE(run("pw").ok);
 }
 
 TEST_CASE("modify: offset and a single byte", "[parser][modify]")
 {
-	Result r = run("modify 10 ff");
+	Result r = run("modify 5 ff");
 	REQUIRE(r.ok);
 	REQUIRE(r.cmd.tag == CMD_MODIFY);
-	CHECK(r.cmd.modify.start == 0x10);
+	CHECK(r.cmd.modify.start == 0x5);
 	CHECK(r.cmd.modify.count == 1);
 	CHECK(r.cmd.modify.data[0] == 0xFF);
 }
 
-TEST_CASE("modify: numbers are hexadecimal", "[parser][modify]")
+TEST_CASE("modify: byte values are hexadecimal", "[parser][modify]")
 {
-	Result r = run("modify a 1f");
+	Result r = run("modify 7 1f");
 	REQUIRE(r.ok);
-	CHECK(r.cmd.modify.start == 0x0A);
+	CHECK(r.cmd.modify.start == 0x7);
 	CHECK(r.cmd.modify.data[0] == 0x1F);
 }
 
@@ -110,13 +103,13 @@ TEST_CASE("modify: multiple bytes preserve order", "[parser][modify]")
 	CHECK(r.cmd.modify.data[3] == 0xEF);
 }
 
-TEST_CASE("modify: offset boundary 3F ok, 40 rejected", "[parser][modify]")
+TEST_CASE("modify: offset boundary 7 ok, 8 rejected", "[parser][modify]")
 {
-	Result ok = run("modify 3f 1");
+	Result ok = run("modify 7 1");
 	REQUIRE(ok.ok);
-	CHECK(ok.cmd.modify.start == 0x3F);
+	CHECK(ok.cmd.modify.start == 0x7);
 
-	Result bad = run("modify 40 1");
+	Result bad = run("modify 8 1");
 	CHECK_FALSE(bad.ok);
 	CHECK(bad.cmd.tag == CMD_SYNTAX_ERROR);
 }
@@ -132,22 +125,22 @@ TEST_CASE("modify: byte value boundary FF ok, 100 rejected", "[parser][modify]")
 
 TEST_CASE("modify: at least one byte is required", "[parser][modify]")
 {
-	Result r = run("modify 10");
+	Result r = run("modify 5");
 	CHECK_FALSE(r.ok);
 }
 
-TEST_CASE("modify: 64 bytes accepted, 65 rejected", "[parser][modify]")
+TEST_CASE("modify: 8 bytes accepted, 9 rejected", "[parser][modify]")
 {
 	std::string base = "modify 0";
-	std::string sixtyfour = base;
-	for (int i = 0; i < 64; i++)
-		sixtyfour += " 1";
-	Result r64 = run(sixtyfour);
-	REQUIRE(r64.ok);
-	CHECK(r64.cmd.modify.count == 64);
+	std::string eight = base;
+	for (int i = 0; i < 8; i++)
+		eight += " 1";
+	Result r8 = run(eight);
+	REQUIRE(r8.ok);
+	CHECK(r8.cmd.modify.count == 8);
 
-	std::string sixtyfive = sixtyfour + " 1";
-	CHECK_FALSE(run(sixtyfive).ok);
+	std::string nine = eight + " 1";
+	CHECK_FALSE(run(nine).ok);
 }
 
 TEST_CASE("fill defaults to 00 and accepts a value", "[parser][fill]")

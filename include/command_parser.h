@@ -17,9 +17,6 @@ typedef enum cmd_tag {
 	CMD_NONE = 0,
 	CMD_SYNTAX_ERROR,
 
-	CMD_POWER,
-	CMD_POWER_ON,
-	CMD_POWER_OFF,
 	CMD_VERBOSE,
 	CMD_STATUS,
 
