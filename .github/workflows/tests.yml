@@ -1,0 +1,26 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  parser-tests:
+    name: Command parser (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # cmake is preinstalled on the runner; flex/bison drive the parser build.
+      # Ubuntu's bison is 3.8, which satisfies the find_package(BISON 3.0) check.
+      - name: Install flex and bison
+        run: sudo apt-get update && sudo apt-get install -y flex bison
+
+      - name: Configure
+        run: cmake -S tests -B tests/build
+
+      - name: Build
+        run: cmake --build tests/build -j
+
+      - name: Test
+        run: ctest --test-dir tests/build --output-on-failure
