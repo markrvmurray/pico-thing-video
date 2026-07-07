@@ -73,8 +73,9 @@ ADD_FLEX_BISON_DEPENDENCY(CmdLexer CmdParser)
 add_executable(pico-thing-video
 		src/pico_thing_video.cpp
 		src/registers.cpp
-		src/usb_descriptors.c
-		src/usb.c
+		src/usb_descriptors.cpp
+		src/usb.cpp
+		src/video.cpp
 )
 
 # Include both the project headers and generated ones
@@ -94,8 +95,11 @@ target_sources(pico-thing-video
 
 # Core 1 stack is 0x800 (2 KiB) by default — bump it to leave headroom for
 # nested ISR levels (DMA prio-0) with FPU lazy stacking.
+#
+# VIDEO_DEMO=1 draws the built-in test screen at boot (default on for now).
 target_compile_definitions(pico-thing-video PRIVATE
 	PICO_CORE1_STACK_SIZE=0x1000
+	VIDEO_DEMO=1
 )
 
 target_link_libraries(pico-thing-video
@@ -115,4 +119,8 @@ pico_enable_stdio_usb(pico-thing-video 0)
 pico_enable_stdio_uart(pico-thing-video 1)
 
 pico_add_extra_outputs(pico-thing-video)
-pico_set_binary_type(pico-thing-video copy_to_ram)
+
+# Run from flash/XIP rather than copying the whole image to SRAM: the ~495 KB
+# video framebuffer needs that SRAM. The timing-critical bus code stays resident
+# in RAM regardless, via __time_critical_func / __not_in_flash_func / __scratch.
+# (Was: pico_set_binary_type(pico-thing-video copy_to_ram))

@@ -32,6 +32,7 @@
 #include "pico_thing_video.h"
 #include "build_time.h"
 #include "command_parser.h"
+#include "video.h"
 
 /* Flex/bison generated scanner API (yy_buffer_state is flex's internal type) */
 extern "C" {
@@ -46,7 +47,10 @@ extern void            cmd_yy_reset_str_pool(void);
 // PIO program headers generated from the .pio file
 #include "pico_thing_video.pio.h"
 
-#define SYS_CLK_DEFAULT 320000000
+// 192 MHz: the HSTX DVI serialiser divides this to a 38.4 MHz pixel clock
+// (CLKDIV=5). The bus PIO runs off clk_sys too, but at div=1 it still samples
+// the ~1-2 MHz 6809 E/Q far faster than needed.
+#define SYS_CLK_DEFAULT 192000000
 
 // Default pico uart for command-line interactive access
 #define CONSOLE uart0
@@ -191,7 +195,6 @@ cmd_parse(char *input, parsed_cmd_t *out)
 }
 
 static void set_power();
-static void reset_power();
 
 // Push a single {location, value} write into the ring so the Core 1 dispatch
 // loop treats a console modify the same as a guest bus write.
@@ -344,13 +347,25 @@ init_pins_range(const uint8_t base, const uint8_t count)
 		gpio_init(base + i);
 }
 
-static void
-__no_inline_not_in_flash_func(main_core1)()
+// One-off Core 1 bring-up: wire the bus + video IRQs/DMA/PIO and start the
+// video engine. Deliberately flash-resident (default placement) — it runs once
+// at startup, so keeping it out of RAM leaves that budget for the framebuffer.
+// Only the hot drain loop in main_core1() has to stay RAM-resident.
+// __noinline is load-bearing: without it the compiler could inline this back
+// into main_core1() (which is in RAM), defeating the point.
+// Bus DMA IRQs sit one priority step below the video scanline IRQ (which stays
+// at 0, the highest), so the per-scanline video handler preempts a running bus
+// handler and never misses its DMA re-arm deadline. Lower number = higher
+// priority on Cortex-M33; 0x40 keeps the bus well above the default (0x80).
+#define BUS_IRQ_PRIORITY 0x40u
+
+static void __noinline
+core1_bringup()
 {
 	printf("Core1 process starting\n");
 
 	irq_set_exclusive_handler(piodma_read.irq, dma_bus_read_irq_handler);
-	irq_set_priority(piodma_read.irq, 0);
+	irq_set_priority(piodma_read.irq, BUS_IRQ_PRIORITY);
 	irq_set_enabled(piodma_read.irq, true);
 	dma_channel_set_irq0_enabled(piodma_read.data_channel, true);
 	dma_channel_start(piodma_read.address_channel);
@@ -358,7 +373,7 @@ __no_inline_not_in_flash_func(main_core1)()
 	printf("Core1 read DMA chain configured\n");
 
 	irq_set_exclusive_handler(piodma_write.irq, dma_bus_write_irq_handler);
-	irq_set_priority(piodma_write.irq, 0);
+	irq_set_priority(piodma_write.irq, BUS_IRQ_PRIORITY);
 	irq_set_enabled(piodma_write.irq, true);
 	dma_channel_set_irq1_enabled(piodma_write.data_channel, true);
 	dma_channel_start(piodma_write.address_channel);
@@ -371,8 +386,26 @@ __no_inline_not_in_flash_func(main_core1)()
 	       PIO_NUM(piodma_read.pio), piodma_read.sm,
 	       PIO_NUM(piodma_write.pio), piodma_write.sm);
 
+	// Bring up the video engine on this core: its per-scanline DMA IRQ
+	// (DMA_IRQ_2) is serviced here, alongside the bus IRQs (DMA_IRQ_0/1).
+	video_init();
+	printf("Core1 video engine started\n");
+#ifdef VIDEO_DEMO
+	// Test-only: draw the built-in test screen once. The DMA scans it out
+	// autonomously afterwards, so we fall through to the bus loop.
+	video_demo();
+	printf("Core1 video demo drawn\n");
+#endif
+
 	printf("Core1 process started\n");
 	core1_initialised = true;
+}
+
+// Core 1 entry: one-off bring-up (in flash) then the RAM-resident drain loop.
+static void
+__no_inline_not_in_flash_func(main_core1)()
+{
+	core1_bringup();
 
 	bool reset_was_asserted = false;
 
@@ -575,38 +608,6 @@ measure_freqs()
 #endif
 
 static void
-pio_shutdown()
-{
-	// --- Disable IRQs first (handlers reference DMA/PIO resources) ---
-
-	// DMA read IRQ
-	dma_channel_set_irq0_enabled(piodma_read.data_channel, false);
-	irq_set_enabled(piodma_read.irq, false);
-	irq_remove_handler(piodma_read.irq, dma_bus_read_irq_handler);
-
-	// DMA write IRQ
-	dma_channel_set_irq1_enabled(piodma_write.data_channel, false);
-	irq_set_enabled(piodma_write.irq, false);
-	irq_remove_handler(piodma_write.irq, dma_bus_write_irq_handler);
-
-	// --- Bus write SM + DMA ---
-	dma_channel_abort(piodma_write.address_channel);
-	dma_channel_abort(piodma_write.data_channel);
-	dma_channel_unclaim(piodma_write.address_channel);
-	dma_channel_unclaim(piodma_write.data_channel);
-	mc6809_bus_write_program_deinit(piodma_write.pio, piodma_write.sm);
-	pio_remove_program(piodma_write.pio, &mc6809_bus_write_program, pio_write_offset);
-
-	// --- Bus read SM + DMA ---
-	dma_channel_abort(piodma_read.address_channel);
-	dma_channel_abort(piodma_read.data_channel);
-	dma_channel_unclaim(piodma_read.address_channel);
-	dma_channel_unclaim(piodma_read.data_channel);
-	mc6809_bus_read_program_deinit(piodma_read.pio, piodma_read.sm);
-	pio_remove_program(piodma_read.pio, &mc6809_bus_read_program, pio_read_offset);
-}
-
-static void
 set_power()
 {
 	// !IRQ is a simulated open-collector output: latch low, then release to
@@ -629,28 +630,12 @@ set_power()
 	multicore_launch_core1(main_core1);
 }
 
-static void
-reset_power()
-{
-	// Kill Core 1 before touching any resources it uses
-	core1_initialised = false;
-	multicore_reset_core1();
-	printf("Core0 core1 stopped\n");
-
-	// Now safe to tear down IRQs, DMA and PIO
-	pio_shutdown();
-	printf("Core0 PIO/DMA disabled\n");
-
-	// Release the interrupt line and remove power
-	gpio_put(GPIO_IRQ, false);
-	DEASSERT_IRQ;
-	printf("Core0 powered down\n");
-}
-
 int
 main()
 {
-	vreg_set_voltage(VREG_VOLTAGE_2_00);
+	// 192 MHz is only a mild overclock; the default core voltage is enough
+	// (pico-vidterm ran 192 MHz at stock voltage). No 320 MHz-style bump.
+	vreg_set_voltage(VREG_VOLTAGE_1_10);
 	sleep_ms(5);
 
 	gpio_set_function(GPIO_UART_TX, UART_FUNCSEL_NUM(uart0, GPIO_UART_TX));
@@ -680,6 +665,11 @@ main()
 	tm tm = build_time_tm();
 	aon_timer_stop();
 	aon_timer_start_calendar(&tm);
+
+	// Bring up the bus peripheral and launch Core 1 (bus engine + video).
+	// This was previously gated by the removed 'power on' command; with no
+	// power command the peripheral now starts unconditionally at boot.
+	set_power();
 
 	printf("Core0 ready!\n");
 

@@ -35,7 +35,7 @@ tusb_desc_device_t const desc_device = {
 	.bNumConfigurations = 1
 };
 
-uint8_t const *
+extern "C" uint8_t const *
 tud_descriptor_device_cb(void)
 {
 	return (uint8_t const *) &desc_device;
@@ -59,7 +59,7 @@ uint8_t const desc_configuration[] = {
 	)
 };
 
-uint8_t const *
+extern "C" uint8_t const *
 tud_descriptor_configuration_cb(uint8_t index)
 {
 	(void) index;
@@ -69,15 +69,19 @@ tud_descriptor_configuration_cb(uint8_t index)
 #define DESC_STR_MAXLEN 32u
 static uint16_t desc_str[DESC_STR_MAXLEN];
 
+/* Supported language: English (0x0409). Named array — a compound literal is
+ * not valid C++ at file scope. */
+static const char lang_desc[] = {0x09, 0x04};
+
 char const *string_desc_arr[] = {
-	(const char[]){0x09, 0x04}, /* supported language: English */
+	lang_desc,                  /* 0: supported language (English) */
 	"MarkM",                    /* 1: Manufacturer */
 	"Pico-Thing-Video",         /* 2: Product */
 	"6809",                     /* 3: Serial number */
 	"Pico-Thing-Video Console", /* 4: CDC 0 (console) */
 };
 
-uint16_t const *
+extern "C" uint16_t const *
 tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 {
 	(void) langid;

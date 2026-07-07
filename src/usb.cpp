@@ -140,14 +140,14 @@ usb_cdc_flush_n(uint8_t itf)
 }
 
 /* Called when device mounted (enumerated) */
-void
+extern "C" void
 tud_mount_cb(void)
 {
 	printf("USB mounted\n");
 }
 
 /* Called when device unmounted (disconnected) */
-void
+extern "C" void
 tud_umount_cb(void)
 {
 	printf("USB unmounted\n");

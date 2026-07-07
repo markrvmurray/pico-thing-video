@@ -18,25 +18,36 @@ extern volatile bool verbose;
 
 // === Pin map ===
 enum {
-	// Default assignment
-	GPIO_UART_TX = 0,	// [o]  RP2xxx UART Tx (console)
-	GPIO_UART_RX = 1,	// [i]  RP2xxx UART Rx (console)
+	// Console UART (UART0)
+	GPIO_UART_TX  = 0,	// [o]  RP2xxx UART Tx (console)
+	GPIO_UART_RX  = 1,	// [i]  RP2xxx UART Rx (console)
+
+	// HSTX DVI output — 4 differential pairs on GP12-19 (Pico DVI Sock):
+	// GP12/13 = D0+/-, GP14/15 = CK+/-, GP16/17 = D2+/-, GP18/19 = D1+/-
+	GPIO_HSTX_BASE = 12,	// [o]  HSTX DVI base (GPIO_HSTX_COUNT pins)
 
 	// Host reset, observed (input)
-	GPIO_RESET   = 23,	// [i]  !RESET
+	GPIO_RESET    = 20,	// [i]  !RESET
 
 	// Interrupt back to the host CPU
-	GPIO_IRQ     = 24,	// [o*] !IRQ (simulated open-collector)
+	GPIO_IRQ      = 21,	// [o*] !IRQ (simulated open-collector)
 
-	// The fast/timing-critical pins (E, Q, R/!W, A2-0, D7-0, !CS) are owned by the
-	// PIO bus programs and defined in pico_thing_video.pio (exported via pico_thing_video.pio.h):
-//	GPIO_E       = 25	// [i]  E clock (supplied by host)
-//	GPIO_Q       = 26	// [i]  Q clock (supplied by host)
-//	GPIO_RW      = 27	// [i]  Bus R/!W
-//	GPIO_A_BASE  = 28	// [i]  Address bus, 3 pins (A2-0)
-//	GPIO_D_BASE  = 31	// [io] Data bus, 8 pins (D7-0)
-//	GPIO_CS      = 39	// [i]  Device !CS (above the D block)
+	// The timing-critical bus pins (E, Q, R/!W, A2-0, D7-0, !CS) and the two PIO
+	// trace pins are owned by the PIO programs and defined in
+	// pico_thing_video.pio (exported via pico_thing_video.pio.h). pioasm needs
+	// them at assembly time, so they cannot live in this header:
+//	GPIO_TRACE_RD = 23	// [o]  PIO bus-read trace (debug)
+//	GPIO_TRACE_WR = 24	// [o]  PIO bus-write trace (debug)
+//	GPIO_E        = 25	// [i]  E clock (supplied by host)
+//	GPIO_Q        = 26	// [i]  Q clock (supplied by host)
+//	GPIO_RW       = 27	// [i]  Bus R/!W
+//	GPIO_A_BASE   = 28	// [i]  Address bus, 3 pins (A2-0)
+//	GPIO_D_BASE   = 31	// [io] Data bus, 8 pins (D7-0)
+//	GPIO_CS       = 39	// [i]  Device !CS (above the D block)
 };
+
+// HSTX drives GPIO_HSTX_COUNT consecutive pins starting at GPIO_HSTX_BASE.
+#define GPIO_HSTX_COUNT 8u
 
 // !RESET is active-low and an INPUT: the host drives it, we observe it.
 #define RESET_IS_ASSERTED (!gpio_get(GPIO_RESET))

@@ -11,8 +11,8 @@
 
 .pio_version	1
 
-.define	public	GPIO_TRACE_RD	20	; Debugging
-.define	public	GPIO_TRACE_WR	21	; Debugging
+.define	public	GPIO_TRACE_RD	23	; Debugging
+.define	public	GPIO_TRACE_WR	24	; Debugging
 
 .define	public	GPIO_E		25	; E clock (input, supplied by host)
 .define	public	GPIO_Q		26	; Q clock (input, supplied by host)
