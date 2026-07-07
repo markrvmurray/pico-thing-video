@@ -1,6 +1,7 @@
 /* usb.c – FreeBSD style */
 
 #include "hardware/clocks.h"
+#include "hardware/irq.h"
 #include "pico/stdlib.h"
 #include "bsp/board.h"
 #include "tusb.h"
@@ -36,6 +37,12 @@ usb_init(void)
 	// Optional board callback after TinyUSB init
 	if (board_init_after_tusb)
 		board_init_after_tusb();
+
+	// USB runs at the default mid-range priority (0x80): its ISR is long and
+	// bursty, so it sits below the bus (0x40) and video (0x00) DMA handlers and
+	// yields to them, without being pinned to the absolute floor.
+	// (Cortex-M33: higher number = lower priority.)
+	irq_set_priority(USBCTRL_IRQ, 0x80u);
 
 	// Force clean enumeration
 	sleep_ms(100);
