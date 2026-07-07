@@ -6,7 +6,8 @@ the bus master and drives the clocks; the Pico2 watches the address/data bus via
 PIO state machines and responds when selected, presenting an 8-byte register
 window that the 6809 can read and write.
 
-A video processor and USB-host keyboard/mouse are planned on top of this base.
+A layered HSTX→DVI video engine is now integrated (see [Video](#video)); a
+USB-host keyboard/mouse is still planned.
 
 ## Hardware role
 
@@ -29,19 +30,36 @@ separate host-side buffers (`read_registers[]` / `write_registers[]`), allowing
 read-only enforcement. Device sub-registers (video, keyboard, mouse) will be
 laid out in this window as they are added.
 
+## Video
+
+A layered HSTX→DVI text+graphics engine (spliced from `../pico-vidterm`) runs on
+Core 1:
+
+- **Output:** DVI on **GP12–19** (four differential pairs, Pico DVI Sock wiring)
+  — 1024×480, RGB332, ~60 Hz. Needs an RP2350 with an HDMI/DVI breakout.
+- **Framebuffer** in SRAM, scanned out by a ping-pong DMA pair on a per-scanline
+  IRQ (its own `DMA_IRQ_2`, at higher priority than the bus). An 8×16 Spleen-font
+  text layer is composited on top.
+- A built-in **test screen** (compiled in via `VIDEO_DEMO`, default on) draws a
+  border, ruler, the full character set, and diagonals at startup.
+
+The `$FF10` register interface for the 6809 to drive the video isn't wired up
+yet — the engine and its test pattern are the current state. See `src/video.cpp`.
+
 ## Pin map
 
 The timing-critical bus pins are owned by the PIO programs. The bus block spans
-GPIO 25–39 (above the default 0–31 window), so each bus PIO sets its GPIO base to
+GPIO 23–39 (above the default 0–31 window), so each bus PIO sets its GPIO base to
 16 before initialising pins. `!CS` sits above the data bus so the write state
 machine can read `R/!W`, the address, and the data as one contiguous field.
 
 | GPIO  | Signal      | Dir | Notes                          |
 |-------|-------------|-----|--------------------------------|
 | 0–1   | UART TX/RX  | —   | console (UART0)                |
-| 20–21 | Bus trace   | out | PIO side-set, debug            |
-| 23    | `!RESET`    | in  | host reset, observed           |
-| 24    | `!IRQ`      | out | simulated open-collector       |
+| 12–19 | HSTX DVI    | out | 4 differential pairs (DVI Sock)|
+| 20    | `!RESET`    | in  | host reset, observed           |
+| 21    | `!IRQ`      | out | simulated open-collector       |
+| 23–24 | Bus trace   | out | PIO side-set, debug            |
 | 25    | E clock     | in  | supplied by host               |
 | 26    | Q clock     | in  | supplied by host               |
 | 27    | `R/!W`      | in  |                                |
