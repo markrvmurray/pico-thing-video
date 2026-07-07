@@ -269,24 +269,18 @@ process_command(char *buf)
 	}
 
 	case CMD_USB: {
-		/* Send each space-separated word as a separate USB CDC write.
-		 * Optional port prefix: "usb 2 ..." sends to CDC interface 1. */
+		/* Send each space-separated word as a separate USB CDC write. */
 		char args[sizeof(cmd.usb.args)];
 		memcpy(args, cmd.usb.args, sizeof(args));
 		char *ptr = args;
-		uint8_t itf = 0;
-		if (ptr[0] == '2' && (ptr[1] == ' ' || ptr[1] == '\t')) {
-			itf = 1;
-			ptr += 2;
-		}
 		char *word;
 		while ((word = strsep(&ptr, " \t")) != nullptr) {
 			if (*word == '\0')
 				continue;
 			snprintf(reinterpret_cast<char *>(buffer), sizeof(buffer), "%s\r\n", word);
-			usb_cdc_write_n(itf, buffer, strlen(reinterpret_cast<char *>(buffer)));
+			usb_cdc_write_n(0, buffer, strlen(reinterpret_cast<char *>(buffer)));
 		}
-		usb_cdc_flush_n(itf);
+		usb_cdc_flush_n(0);
 		break;
 	}
 

@@ -148,57 +148,6 @@ tud_umount_cb(void)
 
 /* CDC handled by polling; no extra callbacks required for simple loopback */
 
-static absolute_time_t g_next_originate;
-
-void
-tud_vendor_rx_cb(uint8_t itf, uint8_t const *buf, uint16_t bufsize)
-{
-	(void) itf;
-	// printf("USB Rx callback: got %u bytes\n", bufsize);
-
-	// MUST tell TinyUSB the data was consumed
-	tud_vendor_read(NULL, bufsize);
-
-	// Send it to the guest
-#if 1
-	if (bufsize > 0) {
-		tud_vendor_write(buf, bufsize);
-		tud_vendor_write_flush();
-	}
-#endif
-}
-
-#ifdef NOT_USED_JUST_YET
-/* Optional vendor tx complete callback */
-void
-tud_vendor_tx_cb(uint8_t itf, uint32_t sent_bytes)
-{
-	(void) itf;
-	(void) sent_bytes;
-	// printf("USB Tx callback\n");
-	/* Could queue more data here */
-}
-#endif
-
-/* Periodic originate interval (ms) */
-#define VENDOR_ORIGINATE_MS   5000
-/* Utility: send periodic vendor-originated message */
-static void
-vendor_maybe_originate(void)
-{
-	if (!tud_mounted())
-		return;
-
-	if (!time_reached(g_next_originate))
-		return;
-
-	const uint8_t msg[] = "device-initiated-ping\n";
-	if (tud_vendor_write(msg, sizeof(msg) - 1) > 0)
-		tud_vendor_write_flush();
-
-	g_next_originate = make_timeout_time_ms(VENDOR_ORIGINATE_MS);
-}
-
 void
 usb_poll(void)
 {
@@ -207,7 +156,6 @@ usb_poll(void)
 	//connected = (tud_cdc_get_line_state() & 0x03u) == 0x03u;
 #ifdef USB_DEBUG
 	cdc_loopback();
-	vendor_maybe_originate();
 #endif
 }
 
