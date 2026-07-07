@@ -10,6 +10,12 @@
  * host (keyboard/mouse) will be layered on top of this window later.
  */
 
+// Build-time toggle (must precede the includes it gates). When defined, clk_sys
+// runs at 320 MHz for more Core-0 grunt rendering the 6809's video commands, and
+// the HSTX/DVI clock is decoupled in main() so the pixel clock stays at 38.4 MHz.
+// Off by default; validate on the bench before relying on it.
+// #define FAST_SYS_CLK_320
+
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -21,6 +27,9 @@
 #include "pico/multicore.h"
 
 #include "hardware/clocks.h"
+#ifdef FAST_SYS_CLK_320
+#include "hardware/pll.h"
+#endif
 #include "hardware/dma.h"
 #include "hardware/irq.h"
 #include "hardware/pio.h"
@@ -47,10 +56,17 @@ extern void            cmd_yy_reset_str_pool(void);
 // PIO program headers generated from the .pio file
 #include "pico_thing_video.pio.h"
 
-// 192 MHz: the HSTX DVI serialiser divides this to a 38.4 MHz pixel clock
-// (CLKDIV=5). The bus PIO runs off clk_sys too, but at div=1 it still samples
-// the ~1-2 MHz 6809 E/Q far faster than needed.
+// ── System clock ────────────────────────────────────────────────────────────
+// Default 192 MHz: the HSTX DVI serialiser divides clk_sys to a 38.4 MHz pixel
+// clock (CSR CLKDIV=5). clk_hstx tracks clk_sys, so the DVI mode is tied to it.
+// The bus PIO runs off clk_sys at div=1, still far faster than the ~1-2 MHz 6809.
+// FAST_SYS_CLK_320 (toggle at the top of this file) selects 320 MHz instead,
+// with clk_hstx decoupled in main() to hold the pixel clock at 38.4 MHz.
+#ifdef FAST_SYS_CLK_320
+#define SYS_CLK_DEFAULT 320000000
+#else
 #define SYS_CLK_DEFAULT 192000000
+#endif
 
 // Default pico uart for command-line interactive access
 #define CONSOLE uart0
@@ -633,9 +649,14 @@ set_power()
 int
 main()
 {
+#ifdef FAST_SYS_CLK_320
+	// 320 MHz needs a core-voltage bump. Verify stability/thermals on hardware.
+	vreg_set_voltage(VREG_VOLTAGE_1_30);
+#else
 	// 192 MHz is only a mild overclock; the default core voltage is enough
-	// (pico-vidterm ran 192 MHz at stock voltage). No 320 MHz-style bump.
+	// (pico-vidterm ran 192 MHz at stock voltage).
 	vreg_set_voltage(VREG_VOLTAGE_1_10);
+#endif
 	sleep_ms(5);
 
 	gpio_set_function(GPIO_UART_TX, UART_FUNCSEL_NUM(uart0, GPIO_UART_TX));
@@ -654,6 +675,28 @@ main()
 		printf("unsuccessful! Reverting to %d MHz ... ", SYS_CLK_HZ/1000000);
 		set_sys_clock_hz(SYS_CLK_HZ, true);
 	}
+
+#ifdef FAST_SYS_CLK_320
+	// clk_sys now runs at 320 MHz off PLL_SYS. Decouple the HSTX/DVI clock so the
+	// pixel clock stays at 38.4 MHz (clk_hstx 192 MHz / CSR CLKDIV 5). We can't
+	// divide 320 MHz down to 192 with an integer, so drive clk_hstx from PLL_USB
+	// instead: reconfigure PLL_USB to 192 MHz, keep USB at 48 MHz (192 / 4 on
+	// clk_usb), and take clk_hstx straight off PLL_USB. Must run before usb_init.
+	//
+	// UNTESTED — this branch is not built by default (so it is not compile- or
+	// bench-checked). Validate the PLL params, the AUXSRC constants, and USB
+	// enumeration on hardware before relying on it. Note: usb_init()'s
+	// "USB clock != 48000 kHz" check measures the PLL_USB *primary* output, which
+	// is now 192 MHz — that warning is expected and cosmetic (clk_usb is 48 MHz).
+	pll_init(pll_usb, 1, 960 * MHZ, 5, 1);   // VCO 960 MHz -> 192 MHz PLL_USB out
+	clock_configure(clk_usb, 0,
+		CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+		192 * MHZ, 48 * MHZ);                // 192 / 4 = 48 MHz for USB
+	clock_configure(clk_hstx, 0,
+		CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+		192 * MHZ, 192 * MHZ);               // 192 MHz -> 38.4 MHz DVI pixel clock
+#endif
+
 	stdio_init_all();
 	uart_init(CONSOLE, CONSOLE_BAUDRATE);
 	printf("successful!\n");
