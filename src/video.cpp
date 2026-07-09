@@ -308,13 +308,31 @@ static void hstx_dvi_init(void)
         2u << HSTX_CTRL_CSR_SHIFT_LSB |
         HSTX_CTRL_CSR_EN_BITS;
 
-    // Pin mapping for Pico DVI Sock:
-    //   GP12/13 = D0+/D0-   GP14/15 = CK+/CK-
-    //   GP16/17 = D2+/D2-   GP18/19 = D1+/D1-
-    hstx_ctrl_hw->bit[2] = HSTX_CTRL_BIT0_CLK_BITS;
-    hstx_ctrl_hw->bit[3] = HSTX_CTRL_BIT0_CLK_BITS | HSTX_CTRL_BIT0_INV_BITS;
+    // ── HSTX output-pin mapping (per board) ───────────────────────────────────
+    // GP12-19 are HSTX bit[0..7]; each adjacent pair drives one differential
+    // lane. HSTX_CLK_BIT is the pair that outputs the pixel clock; the loop maps
+    // each TMDS data lane (0/1/2) to its output-bit pair via lane_to_output_bit.
+    // Clock and data can land on any of the four pairs, so per-board DVI routing
+    // differences live entirely here.
+    //   Signal ↔ TMDS lane: D1 = lane 0 (SEL 0/1), D2 = lane 1 (SEL 10/11),
+    //                       D0 = lane 2 (SEL 20/21).
+#if defined(SOLDERPARTY_RP2350_STAMP_XL_CARRIER)
+    // Validated mapping (Pico DVI Sock style):
+    //   GP12/13 = D0   GP14/15 = CK   GP16/17 = D2   GP18/19 = D1
+    static const int HSTX_CLK_BIT = 2;
+    static const int lane_to_output_bit[3] = {6, 4, 0};
+#elif defined(PIMORONI_PGA2350)
+    // Swap D0<->CK and D1<->D2 relative to the SolderParty routing:
+    //   GP12/13 = CK   GP14/15 = D0   GP16/17 = D1   GP18/19 = D2
+    static const int HSTX_CLK_BIT = 0;
+    static const int lane_to_output_bit[3] = {4, 6, 2};
+#else
+    #error "No HSTX pin mapping for this PICO_BOARD (expected solderparty_rp2350_stamp_xl_carrier or pimoroni_pga2350)"
+#endif
+
+    hstx_ctrl_hw->bit[HSTX_CLK_BIT    ] = HSTX_CTRL_BIT0_CLK_BITS;
+    hstx_ctrl_hw->bit[HSTX_CLK_BIT + 1] = HSTX_CTRL_BIT0_CLK_BITS | HSTX_CTRL_BIT0_INV_BITS;
     for (uint lane = 0; lane < 3; ++lane) {
-        static const int lane_to_output_bit[3] = {6, 4, 0};
         int bit = lane_to_output_bit[lane];
         uint32_t lane_data_sel_bits =
             (lane * 10    ) << HSTX_CTRL_BIT0_SEL_P_LSB |

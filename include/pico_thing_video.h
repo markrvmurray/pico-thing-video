@@ -22,8 +22,9 @@ enum {
 	GPIO_UART_TX  = 0,	// [o]  RP2xxx UART Tx (console)
 	GPIO_UART_RX  = 1,	// [i]  RP2xxx UART Rx (console)
 
-	// HSTX DVI output — 4 differential pairs on GP12-19 (Pico DVI Sock):
-	// GP12/13 = D0+/-, GP14/15 = CK+/-, GP16/17 = D2+/-, GP18/19 = D1+/-
+	// HSTX DVI output — 4 differential pairs on GP12-19 (Pico DVI Sock).
+	// Per-pair lane/clock assignment is board-gated in hstx_dvi_init()
+	// (video.cpp): SolderParty has CK on GP14/15; Pimoroni has CK on GP12/13.
 	GPIO_HSTX_BASE = 12,	// [o]  HSTX DVI base (GPIO_HSTX_COUNT pins)
 
 	// Host reset, observed (input)
