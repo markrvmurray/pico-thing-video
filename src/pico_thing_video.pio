@@ -67,10 +67,11 @@ wait_q:
 static inline void
 mc6809_bus_read_program_init(PIO pio, uint sm, uint offset)
 {
-	// Bus pins live at GPIO 20-39, above the default 0-31 window. Shift this
-	// PIO block's GPIO base to 16 (covers 16-47) BEFORE any pio_gpio_init(),
-	// which otherwise rejects the D pins at GPIO 32-38 as out of range.
-	pio_set_gpio_base(pio, 16);
+	// The GPIO base has already been shifted to 16 (covers 16-47) by the
+	// caller BEFORE pio_add_program(): pio_set_gpio_base() refuses once any
+	// program is loaded, and pio_add_program() itself relocates the wait-gpio
+	// instructions against the base, so both must see base 16 first. Here it
+	// just lets pio_gpio_init() accept the D pins at GPIO 32-38.
 	for (uint i = 0; i < 8; i++)
 		pio_gpio_init(pio, GPIO_D_BASE + i);
 	pio_sm_set_consecutive_pindirs(pio, sm, GPIO_D_BASE, 8, false);
@@ -142,9 +143,8 @@ wait_q:
 static inline void
 mc6809_bus_write_program_init(PIO pio, uint sm, uint offset)
 {
-	// See the read init: the bus pins are above GPIO 31, so this PIO block's
-	// GPIO base must be 16 before any pin is initialised.
-	pio_set_gpio_base(pio, 16);
+	// The GPIO base is set to 16 by the caller before pio_add_program() (see
+	// the read init for why it cannot be done here).
 	pio_gpio_init(pio, GPIO_TRACE_WR);
 	pio_sm_set_consecutive_pindirs(pio, sm, GPIO_TRACE_WR, 1, true);
 	pio_sm_config c = mc6809_bus_write_program_get_default_config(offset);

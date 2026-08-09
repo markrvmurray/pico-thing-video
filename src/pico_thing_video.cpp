@@ -496,6 +496,12 @@ bus_pio_dma_init()
 	dma_channel_claim(piodma_read.data_channel);
 
 	// SM: Bus read responder
+	// The bus pins span GPIO 23-39, so the PIO GPIO base must be 16 (window
+	// 16-47). This MUST happen before pio_add_program(): pio_set_gpio_base()
+	// refuses once a program is loaded (returns PICO_ERROR_INVALID_STATE and
+	// leaves the base at 0), and pio_add_program() relocates the wait-gpio
+	// instructions relative to the base as it loads them.
+	pio_set_gpio_base(piodma_read.pio, 16);
 	pio_read_offset = pio_add_program(piodma_read.pio, &mc6809_bus_read_program);
 	if (pio_read_offset < 0) {
 		printf("Core0 insufficient space for bus_read program\n");
@@ -542,6 +548,8 @@ bus_pio_dma_init()
 	printf("Core0 DMA read_address channel configured\n");
 
 	// SM: Bus write responder
+	// Base 16 before the program is loaded, as for the read PIO above.
+	pio_set_gpio_base(piodma_write.pio, 16);
 	pio_write_offset = pio_add_program(piodma_write.pio, &mc6809_bus_write_program);
 	if (pio_write_offset < 0) {
 		printf("Core0 insufficient space for bus_write program\n");
