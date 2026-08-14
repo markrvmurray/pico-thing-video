@@ -128,17 +128,16 @@ A CC controller would add *automatic* host/device detection, but every mainstrea
 option is a leadless QFN/SON too fine to hand-assemble — so this whole class is
 **shelved** unless a future rev goes to assembled fab (JLCPCB / hot-air + stencil).
 Kept for reference. If revisited, **PTN5150A** (pure CC logic, no PD → light
-firmware) is the pick; FUSB302B works but is a full PD PHY needing a ported
-driver (overkill — no PD needed). Datasheet + KiCad symbol/footprint for the
-PTN5150A already live in `datasheets/` and `kicad/`.
+firmware) is a good pick; FUSB302B works but is a full PD PHY needing a ported
+driver (overkill — no PD needed).
 
-| Part | Vendor | I/F | Package | Notes |
-|---|---|---|---|---|
-| **PTN5150A** | NXP | I²C | X2QFN12, 1.6 mm | Best fit *electrically*; rejected on size. CC logic + DRP + orientation, no PD. |
-| FUSB302B | onsemi | I²C | WQFN-14 | Full Type-C **PD** PHY; DRP; needs a ported CC/PD stack. Overkill (no PD). |
-| HUSB320 | Hynetek | I²C / strap | QFN | TUSB320-class DRP; cheap, strong LCSC stock (JLCPCB assembly). |
-| WUSB3801 | Will Semi | I²C / strap | QFN/USON | Type-C DRP port controller; LCSC-stocked. |
-| TUSB320LAI / TUSB320I | TI | I²C / strap | WQFN/X2SON | Same family; all leadless. |
+| Part                  | Vendor    | I/F         | Package         | Notes                                                                          |
+|-----------------------|-----------|-------------|-----------------|--------------------------------------------------------------------------------|
+| **PTN5150A**          | NXP       | I²C         | X2QFN12, 1.6 mm | Best fit *electrically*; rejected on size. CC logic + DRP + orientation, no PD. |
+| FUSB302B              | onsemi    | I²C         | WQFN-14         | Full Type-C **PD** PHY; DRP; needs a ported CC/PD stack. Overkill (no PD).      |
+| HUSB320               | Hynetek   | I²C / strap | QFN             | TUSB320-class DRP; cheap, strong LCSC stock (JLCPCB assembly).                  |
+| WUSB3801              | Will Semi | I²C / strap | QFN/USON        | Type-C DRP port controller; LCSC-stocked.                                       |
+| TUSB320LAI / TUSB320I | TI        | I²C / strap | WQFN/X2SON      | Same family; all leadless.                                                      |
 
 All leadless — none in SOIC/TSSOP; that class simply doesn't make a leaded CC
 controller. Not suitable at all (sink-only PD triggers, cannot present a host/DFP
