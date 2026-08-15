@@ -30,17 +30,8 @@
 
 /* ───────────────────────── compile-time parameters ──────────────────────── */
 
-// 1024 active. 1056 overflows SRAM by ~6 KB — the framebuffer (1 byte/pixel)
-// plus the 80x30-ish text layer leaves no room for the extra 32 columns.
-// The 32 dropped columns are added to the H back porch below so the 60 Hz
-// horizontal total (1216) is unchanged.
-#define FB_WIDTH       1024
-#define FB_HEIGHT      480
-
-#define CHAR_W           8
-#define CHAR_H          16
-#define TEXT_COLS       (FB_WIDTH / CHAR_W)   /* 128 */
-#define TEXT_ROWS       (FB_HEIGHT / CHAR_H)  /*  30 */
+/* Screen geometry (FB_WIDTH/FB_HEIGHT/CHAR_W/CHAR_H/TEXT_COLS/TEXT_ROWS) is the
+ * single source of truth in video.h, so consumers cannot drift from it. */
 
 #define TRANSPARENT_BG  0x00
 

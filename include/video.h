@@ -17,6 +17,24 @@
 
 #include <stdint.h>
 
+/* ── Screen geometry (single source of truth) ────────────────────────────────
+ * The active resolution and text-cell size. These describe the video *mode*,
+ * not the board — both the SolderParty and Pimoroni mappings scan out the same
+ * 1024x480 RGB332 buffer; only the DVI lane->pin routing differs (that lives in
+ * video.cpp's board-gated hstx_dvi_init()). Consumers that map pixels to text
+ * cells (e.g. the USB-host mouse cursor) include this header so they cannot
+ * drift from the framebuffer.
+ *
+ * 1024 active: 1056 overflows SRAM by ~6 KB, so the dropped 32 columns go into
+ * the H back porch, leaving the 60 Hz horizontal total unchanged. */
+#define FB_WIDTH       1024
+#define FB_HEIGHT      480
+
+#define CHAR_W           8
+#define CHAR_H          16
+#define TEXT_COLS       (FB_WIDTH / CHAR_W)   /* 128 */
+#define TEXT_ROWS       (FB_HEIGHT / CHAR_H)  /*  30 */
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -19,6 +19,14 @@ if(NOT PICO_SDK_PATH)
 endif()
 include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
+# USB role, selected at build time (the board carries a single native USB PHY,
+# so it is host OR device, never both). Default OFF = USB-CDC device (today's
+# behaviour). ON = USB HID host (keyboard + mouse via a hub), and the USB-CDC
+# console is unavailable — the console stays on UART0. This one switch drives
+# both the linked TinyUSB target and the -DUSB_HOST_MODE compile flag that
+# tusb_config.h and the sources key off, so the two can never drift apart.
+option(USB_HOST_MODE "Build USB as HID host (keyboard+mouse) instead of CDC device" OFF)
+
 # Flex and bison run on the BUILD HOST; the generated .c files are
 # cross-compiled for RP2350 by arm-none-eabi-gcc.
 #
@@ -76,10 +84,18 @@ ADD_FLEX_BISON_DEPENDENCY(CmdLexer CmdParser)
 add_executable(pico-thing-video
 		src/pico_thing_video.cpp
 		src/registers.cpp
-		src/usb_descriptors.cpp
 		src/usb.cpp
 		src/video.cpp
 )
+
+# USB role-specific sources: the device build needs its descriptors; the host
+# build needs the HID/hub callbacks + input cooking instead (and never uses the
+# device descriptors).
+if(USB_HOST_MODE)
+	target_sources(pico-thing-video PRIVATE src/usb_host.cpp)
+else()
+	target_sources(pico-thing-video PRIVATE src/usb_descriptors.cpp)
+endif()
 
 # Include both the project headers and generated ones
 target_include_directories(pico-thing-video
@@ -114,10 +130,19 @@ target_link_libraries(pico-thing-video
 	hardware_irq
 	hardware_pio
 	hardware_vreg
-	tinyusb_device
 	tinyusb_board
 )
 
+# Link the TinyUSB stack matching the build-time role (see USB_HOST_MODE above).
+if(USB_HOST_MODE)
+	target_link_libraries(pico-thing-video tinyusb_host)
+	target_compile_definitions(pico-thing-video PRIVATE USB_HOST_MODE=1)
+else()
+	target_link_libraries(pico-thing-video tinyusb_device)
+endif()
+
+# stdio never rides USB in either role (device: CDC is a separate virtual UART
+# for the guest; host: no CDC at all). The console is always UART0.
 pico_enable_stdio_usb(pico-thing-video 0)
 pico_enable_stdio_uart(pico-thing-video 1)
 

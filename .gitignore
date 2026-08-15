@@ -1,6 +1,6 @@
 .idea
 
-build
+build*
 cmake-*
 compile_commands.json
 

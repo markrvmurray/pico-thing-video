@@ -27,12 +27,16 @@ usb_init(void)
 	if (usb_freq != 48000)
 		printf("ERROR: USB clock is %u kHz and not 48000 kHz\n",usb_freq);
 
-	// TinyUSB device stack
-	tusb_rhport_init_t dev_init = {
+	// TinyUSB stack — role is fixed at build time (single native PHY).
+	tusb_rhport_init_t rh_init = {
+#if USB_HOST_MODE
+		.role = TUSB_ROLE_HOST,
+#else
 		.role = TUSB_ROLE_DEVICE,
+#endif
 		.speed = TUSB_SPEED_AUTO
 	};
-	tusb_init(0, &dev_init);
+	tusb_init(0, &rh_init);
 
 	// Optional board callback after TinyUSB init
 	if (board_init_after_tusb)
@@ -44,7 +48,9 @@ usb_init(void)
 	// (Cortex-M33: higher number = lower priority.)
 	irq_set_priority(USBCTRL_IRQ, 0x80u);
 
-	// Force clean enumeration
+#if !USB_HOST_MODE
+	// Force clean enumeration (device role only — the host does not present
+	// itself, it powers and enumerates whatever is plugged in).
 	sleep_ms(100);
 	tud_disconnect();
 	sleep_ms(100);
@@ -52,7 +58,10 @@ usb_init(void)
 
 	// Optional extra delay for host
 	sleep_ms(50);
+#endif
 }
+
+#if !USB_HOST_MODE
 
 #ifdef USB_DEBUG
 static void
@@ -155,19 +164,42 @@ tud_umount_cb(void)
 
 /* CDC handled by polling; no extra callbacks required for simple loopback */
 
+#else /* USB_HOST_MODE — no CDC in a host build: the guest console stays on UART0.
+       * These stubs keep poll_console() and the `usb` command linking. */
+
+uint16_t usb_cdc_read(uint8_t *, const uint16_t) { return 0u; }
+uint16_t usb_cdc_write(const uint8_t *, const uint16_t) { return 0u; }
+void     usb_cdc_flush(void) { }
+uint16_t usb_cdc_read_n(uint8_t, uint8_t *, const uint16_t) { return 0u; }
+uint16_t usb_cdc_write_n(uint8_t, const uint8_t *, const uint16_t) { return 0u; }
+void     usb_cdc_flush_n(uint8_t) { }
+
+/* Provided by usb_host.cpp: true once at least one HID device is mounted. */
+extern "C" bool usb_host_mounted(void);
+
+#endif /* !USB_HOST_MODE */
+
 void
 usb_poll(void)
 {
+#if USB_HOST_MODE
+	tuh_task();
+#else
 	tud_task();
 	// Keep cranking the USB handle I'm waiting for DTR and RTS.
 	//connected = (tud_cdc_get_line_state() & 0x03u) == 0x03u;
 #ifdef USB_DEBUG
 	cdc_loopback();
 #endif
+#endif
 }
 
 bool
 usb_is_active(void)
 {
+#if USB_HOST_MODE
+	return usb_host_mounted();
+#else
 	return (tud_ready());
+#endif
 }
