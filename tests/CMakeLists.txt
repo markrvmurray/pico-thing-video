@@ -4,6 +4,22 @@ project(pico-thing-video-tests CXX C)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_C_STANDARD 11)
 
+# Keep build trees out of Time Machine: they churn on every build and can be
+# regenerated.  A sticky exclusion (no -p) is stored on the directory itself,
+# so unlike a fixed-path one it needs no root; it goes if the directory is
+# deleted and comes back at the next configure.
+# CMAKE_HOST_APPLE to match the firmware build, where APPLE is false.
+if(CMAKE_HOST_APPLE)
+    find_program(_tmutil tmutil NO_CMAKE_FIND_ROOT_PATH)
+    if(_tmutil)
+        execute_process(COMMAND ${_tmutil} addexclusion "${CMAKE_BINARY_DIR}"
+            RESULT_VARIABLE _tmutil_result OUTPUT_QUIET ERROR_QUIET)
+        if(NOT _tmutil_result EQUAL 0)
+            message(STATUS "Could not exclude ${CMAKE_BINARY_DIR} from Time Machine")
+        endif()
+    endif()
+endif()
+
 # macOS ships bison 2.3 which is too old; use Homebrew bison 3.x.
 if(APPLE)
     find_program(_bison_homebrew
