@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.14)  # 3.14+ for BISON_TARGET DEFINES_FILE
-# Development board (has the HDMI/DVI breakout for bringing up the video engine).
-# Swap back to pimoroni_pga2350 for roll-out.
-#set(PICO_BOARD pimoroni_pga2350)
-set(PICO_BOARD solderparty_rp2350_stamp_xl_carrier)
+# Roll-out board: the v2.0 PCB carries a Pimoroni PGA2350 (+ TPS2051B USB-C
+# front end). Swap back to the SolderParty carrier for dev-board work.
+set(PICO_BOARD pimoroni_pga2350)
+#set(PICO_BOARD solderparty_rp2350_stamp_xl_carrier)
 
 # Locate the Pico SDK import script.  PICO_SDK_PATH may arrive either as an
 # environment variable (command-line builds that `export` it) or as a CMake

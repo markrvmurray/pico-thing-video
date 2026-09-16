@@ -6,6 +6,7 @@
 #include "bsp/board.h"
 #include "tusb.h"
 #include "usb.h"
+#include "pico_thing_video.h"
 
 // --- USB optional init / force enumeration ---
 void
@@ -21,6 +22,21 @@ usb_init(void)
 
 	// Initialize board pins (USB DP/DM, etc.)
 	board_init();
+
+#if defined(PIMORONI_PGA2350)
+	// v2.0 PCB USB-C front end: one Role GPIO switches the CC mux (Rp vs Rd)
+	// and the TPS2051B VBUS switch together, so driving it to match the
+	// build-time role is the whole host/device changeover. Do it before the
+	// stack starts: a host must be sourcing VBUS before anything can attach.
+	gpio_init(GPIO_USB_ROLE);
+#if USB_HOST_MODE
+	gpio_put(GPIO_USB_ROLE, 1);
+#else
+	gpio_put(GPIO_USB_ROLE, 0);
+#endif
+	gpio_set_dir(GPIO_USB_ROLE, GPIO_OUT);
+	gpio_init(GPIO_PWR_FAULT);	// !FLT input; the board pulls it up
+#endif
 
 	// Check USB clock frequency
 	uint usb_freq = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_PLL_USB_CLKSRC_PRIMARY);
@@ -184,6 +200,16 @@ usb_poll(void)
 {
 #if USB_HOST_MODE
 	tuh_task();
+#if defined(PIMORONI_PGA2350)
+	// TPS2051B !FLT while sourcing VBUS: log each edge, not each poll.
+	static bool faulted = false;
+	bool fault = !gpio_get(GPIO_PWR_FAULT);
+	if (fault != faulted) {
+		faulted = fault;
+		printf(fault ? "USB: VBUS power fault (overcurrent/overtemp)\n"
+		             : "USB: VBUS power fault cleared\n");
+	}
+#endif
 #else
 	tud_task();
 	// Keep cranking the USB handle I'm waiting for DTR and RTS.

@@ -22,6 +22,21 @@ enum {
 	GPIO_UART_TX  = 0,	// [o]  RP2xxx UART Tx (console)
 	GPIO_UART_RX  = 1,	// [i]  RP2xxx UART Rx (console)
 
+	// USB-C front end (v2.0 PCB only; not connected on the Stamp XL carrier,
+	// where VBUS comes from the carrier's own switched USB-A port). Role
+	// drives the 74LVC2G3157 CC-mux selects and the TPS2051B VBUS-switch
+	// enable together: high = host (Rp presented on CC, VBUS sourced), low =
+	// device (Rd presented, VBUS off). !PowerFault is the TPS2051B's
+	// open-drain !FLT (10k pull-up on the board); low = overcurrent or
+	// overtemperature while sourcing VBUS.
+	GPIO_PWR_FAULT = 7,	// [i]  !FLT from the TPS2051B VBUS switch
+	GPIO_USB_ROLE  = 8,	// [o]  USB role select: 1 = host, 0 = device
+
+	// HDMI connector sideband (v2.0 PCB only; unused by the firmware so far)
+	GPIO_HPD      = 9,	// [i]  HDMI hot-plug detect
+	GPIO_DDC_SDA  = 10,	// [io] HDMI DDC (I2C1 SDA)
+	GPIO_DDC_SCL  = 11,	// [io] HDMI DDC (I2C1 SCL)
+
 	// HSTX DVI output — 4 differential pairs on GP12-19 (Pico DVI Sock).
 	// Per-pair lane/clock assignment is board-gated in hstx_dvi_init()
 	// (video.cpp): SolderParty has CK on GP14/15; Pimoroni has CK on GP12/13.
