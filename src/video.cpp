@@ -35,6 +35,15 @@
 
 #define TRANSPARENT_BG  0x00
 
+/* Force -O3 on hot rendering functions regardless of the build type. Only GCC
+ * implements the optimize function attribute; clang-based toolchains (ATfE)
+ * reject it, so there the macro is empty and the build's own level applies. */
+#if defined(__GNUC__) && !defined(__clang__)
+#define OPTIMIZE_O3 __attribute__((optimize("O3")))
+#else
+#define OPTIMIZE_O3
+#endif
+
 /* Per-scanline video IRQ. Bus engine owns DMA_IRQ_0/1, so video uses IRQ 2. */
 #define VIDEO_DMA_IRQ_IDX 2
 #define VIDEO_DMA_IRQ     DMA_IRQ_2
@@ -89,7 +98,7 @@ static inline uint8_t font_row(uint8_t ch, int row)
 
 /* ────────────────────── text cell rendering (blitting) ──────────────────── */
 
-static void __attribute__((optimize("O3")))
+static void OPTIMIZE_O3
 blit_char_cell(int col, int row)
 {
     uint8_t ch   = text_cells[row][col];
