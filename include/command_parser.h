@@ -17,8 +17,12 @@ typedef enum cmd_tag {
 	CMD_NONE = 0,
 	CMD_SYNTAX_ERROR,
 
+	CMD_HELP,
 	CMD_VERBOSE,
 	CMD_STATUS,
+	CMD_POWER,
+	CMD_TIME_QUERY,
+	CMD_TIME_SET,
 
 	CMD_EXAMINE,
 	CMD_MODIFY,
@@ -30,6 +34,22 @@ typedef enum cmd_tag {
 typedef struct parsed_cmd {
 	cmd_tag_t tag;
 	union {
+		/* CMD_STATUS */
+		struct {
+			uint32_t period; /* repeat period in ms; 0 = once */
+		} status;
+
+		/* CMD_TIME_SET */
+		struct {
+			int year;   /* full year, e.g. 2026 */
+			int month;  /* 0-based, ready for tm_mon */
+			int day;    /* 1-based */
+			int hour;
+			int minute;
+			int second;
+			int count;  /* how many fields were given (1..6) */
+		} time;
+
 		/* CMD_MODIFY */
 		struct {
 			uint16_t start;

@@ -74,6 +74,9 @@ static int
 match_command_keyword(const char *text)
 {
 	static const struct { const char *name; const char *alias; int tok; } kw[] = {
+		{ "help",    "h",  TOK_HELP    },
+		{ "power",   "pw", TOK_POWER   },
+		{ "time",    "ti", TOK_TIME    },
 		{ "verbose", "vb", TOK_VERBOSE },
 		{ "status",  "st", TOK_STATUS  },
 		{ "examine", "ex", TOK_EXAMINE },

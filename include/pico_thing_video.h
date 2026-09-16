@@ -60,6 +60,11 @@ enum {
 //	GPIO_A_BASE   = 28	// [i]  Address bus, 3 pins (A2-0)
 //	GPIO_D_BASE   = 31	// [io] Data bus, 8 pins (D7-0)
 //	GPIO_CS       = 39	// [i]  Device !CS (above the D block)
+
+	// Main-power sense (v2.0 PCB): the board's main 5V supply through a
+	// divide-by-2 resistor pair, so a healthy rail reads ~2.5 V. Sampled by
+	// power.cpp to follow the host system's power state automatically.
+	GPIO_PWR_SENSE = 46,	// [i]  ADC6: main 5V rail / 2
 };
 
 // HSTX drives GPIO_HSTX_COUNT consecutive pins starting at GPIO_HSTX_BASE.

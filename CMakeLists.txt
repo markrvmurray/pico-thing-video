@@ -99,6 +99,7 @@ ADD_FLEX_BISON_DEPENDENCY(CmdLexer CmdParser)
 
 add_executable(pico-thing-video
 		src/pico_thing_video.cpp
+		src/power.cpp
 		src/registers.cpp
 		src/usb.cpp
 		src/video.cpp
@@ -142,10 +143,12 @@ target_link_libraries(pico-thing-video
 	pico_multicore
 	pico_aon_timer
 	pico_unique_id
+	hardware_adc
 	hardware_dma
 	hardware_irq
 	hardware_pio
 	hardware_vreg
+	hardware_watchdog
 	tinyusb_board
 )
 

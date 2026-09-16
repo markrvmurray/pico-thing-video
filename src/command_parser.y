@@ -37,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <limits.h>
 
 /* Forward declaration of lexer function */
 extern int  cmd_yylex(void);
@@ -54,9 +55,24 @@ parse_hex(const char *s)
 	return v;
 }
 
+/* Parse a decimal string into a long.
+ * Returns LONG_MIN on invalid input (non-decimal character found). */
+static long
+parse_dec(const char *s)
+{
+	char *end;
+	long v = strtol(s, &end, 10);
+	if (*end != '\0')
+		return LONG_MIN;
+	return v;
+}
+
 /* Static accumulator for the modify byte list */
 static uint8_t  _bytes[64];
 static int      _byte_count;
+
+/* Static accumulators for the time argument list */
+static int _t_year, _t_month, _t_day, _t_hour, _t_minute, _t_second, _t_count;
 %}
 
 /* -----------------------------------------------------------------------
@@ -80,6 +96,9 @@ static int      _byte_count;
  * ----------------------------------------------------------------------- */
 
 /* Command keywords */
+%token TOK_HELP
+%token TOK_POWER
+%token TOK_TIME
 %token TOK_VERBOSE
 %token TOK_STATUS
 %token TOK_EXAMINE
@@ -102,7 +121,10 @@ start:
   ;
 
 command:
-	  verbose_cmd
+	  help_cmd
+	| power_cmd
+	| time_cmd
+	| verbose_cmd
 	| status_cmd
 	| examine_cmd
 	| modify_cmd
@@ -114,12 +136,132 @@ command:
 /* -----------------------------------------------------------------------
  * Simple no-argument commands
  * ----------------------------------------------------------------------- */
+help_cmd:
+	TOK_HELP { result->tag = CMD_HELP; }
+	;
+
+power_cmd:
+	TOK_POWER { result->tag = CMD_POWER; }
+	;
+
 verbose_cmd:
 	TOK_VERBOSE { result->tag = CMD_VERBOSE; }
 	;
 
+/* -----------------------------------------------------------------------
+ * status [ <period> ]   (period in decimal ms; repeats until a key)
+ * ----------------------------------------------------------------------- */
 status_cmd:
-	TOK_STATUS { result->tag = CMD_STATUS; }
+	  TOK_STATUS {
+		result->tag           = CMD_STATUS;
+		result->status.period = 0u;
+	}
+	| TOK_STATUS TOK_NUMBER {
+		long v = parse_dec($2);
+		if (v == LONG_MIN || v < 0) {
+			printf("Invalid period '%s' (decimal ms)\n", $2);
+			YYERROR;
+		}
+		result->tag           = CMD_STATUS;
+		result->status.period = (uint32_t)v;
+	}
+	;
+
+/* -----------------------------------------------------------------------
+ * time [ <year> [<month> [<day> [<hour> [<minute> [<second>]]]]] ]
+ * All arguments are decimal.
+ * ----------------------------------------------------------------------- */
+time_cmd:
+	  TOK_TIME {
+		result->tag = CMD_TIME_QUERY;
+	}
+	| TOK_TIME time_args {
+		result->tag         = CMD_TIME_SET;
+		result->time.year   = _t_year;
+		result->time.month  = _t_month;
+		result->time.day    = _t_day;
+		result->time.hour   = _t_hour;
+		result->time.minute = _t_minute;
+		result->time.second = _t_second;
+		result->time.count  = _t_count;
+	}
+	;
+
+time_args:
+	  time_year
+	| time_year time_month
+	| time_year time_month time_day
+	| time_year time_month time_day time_hour
+	| time_year time_month time_day time_hour time_minute
+	| time_year time_month time_day time_hour time_minute time_second
+	;
+
+time_year:
+	TOK_NUMBER {
+		long v = parse_dec($1);
+		if (v == LONG_MIN || v < 2025 || v > 2061) {
+			printf("Invalid year '%s' (valid: 2025-2061)\n", $1);
+			YYERROR;
+		}
+		_t_year = (int)v; _t_month = 0; _t_day = 1;
+		_t_hour = 0; _t_minute = 0; _t_second = 0; _t_count = 1;
+	}
+	;
+
+time_month:
+	TOK_NUMBER {
+		long v = parse_dec($1);
+		if (v == LONG_MIN || v < 1 || v > 12) {
+			printf("Invalid month '%s' (valid: 1-12)\n", $1);
+			YYERROR;
+		}
+		_t_month = (int)(v - 1); /* convert to 0-based for tm_mon */
+		_t_count = 2;
+	}
+	;
+
+time_day:
+	TOK_NUMBER {
+		long v = parse_dec($1);
+		if (v == LONG_MIN || v < 1 || v > 31) {
+			printf("Invalid day '%s' (valid: 1-31)\n", $1);
+			YYERROR;
+		}
+		_t_day = (int)v; _t_count = 3;
+	}
+	;
+
+time_hour:
+	TOK_NUMBER {
+		long v = parse_dec($1);
+		if (v == LONG_MIN || v < 0 || v > 23) {
+			printf("Invalid hour '%s' (valid: 0-23)\n", $1);
+			YYERROR;
+		}
+		_t_hour = (int)v; _t_count = 4;
+	}
+	;
+
+time_minute:
+	TOK_NUMBER {
+		long v = parse_dec($1);
+		if (v == LONG_MIN || v < 0 || v > 59) {
+			printf("Invalid minute '%s' (valid: 0-59)\n", $1);
+			YYERROR;
+		}
+		_t_minute = (int)v; _t_count = 5;
+	}
+	;
+
+time_second:
+	TOK_NUMBER {
+		long v = parse_dec($1);
+		if (v == LONG_MIN || v < 0 || v > 59) {
+			printf("Invalid second '%s' (valid: 0-59)\n", $1);
+			YYERROR;
+		}
+		_t_second = (int)v; _t_count = 6;
+	}
 	;
 
 examine_cmd:

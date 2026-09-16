@@ -23,6 +23,7 @@
 #include <ctime>
 
 #include "pico/aon_timer.h"
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 
@@ -37,6 +38,7 @@
 
 #include "tusb.h"
 #include "usb.h"
+#include "power.h"
 #include "registers.h"
 #include "pico_thing_video.h"
 #include "build_time.h"
@@ -194,6 +196,33 @@ print_time()
 		printf("Unable to get calendar time\n");
 }
 
+#define ANSI_CLEAR_SCREEN "\033[2J"
+#define ANSI_CURSOR_HOME   "\033[H"
+
+static void
+print_power()
+{
+	const uint32_t mv = power_millivolts();
+	printf("Main 5V:     %lu.%02lu V (%s) — %s\n",
+	       (unsigned long)(mv / 1000u), (unsigned long)((mv % 1000u) / 10u),
+	       power_is_on() ? "present" : "absent",
+	       core1_initialised ? "bus and video serving" : "standby, console only");
+}
+
+static void
+print_status()
+{
+	printf("Verbose:     %s\n", verbose ? "on" : "off");
+	print_power();
+	printf("!RESET:      %s\n", RESET_IS_ASSERTED ? "asserted" : "released");
+	printf("!IRQ:        %s\n", IRQ_IS_ASSERTED ? "asserted" : "released");
+	printf("Core1 loop:  %lu  isr: %lu\n",
+	       (unsigned long)core1_loop_count, (unsigned long)core1_isr_count);
+	printf("Last write:  %02X  last read: %02X\n",
+	       core1_last_write_loc, core1_last_read_loc);
+	registers::dump();
+}
+
 /* cmd_parse() - glue between process_command() and the flex/bison parser */
 bool
 cmd_parse(char *input, parsed_cmd_t *out)
@@ -248,16 +277,69 @@ process_command(char *buf)
 		printf("Verbose mode %s\n", verbose ? "on" : "off");
 		break;
 
-	case CMD_STATUS:
-		printf("Verbose:     %s\n", verbose ? "on" : "off");
-		printf("!RESET:      %s\n", RESET_IS_ASSERTED ? "asserted" : "released");
-		printf("!IRQ:        %s\n", IRQ_IS_ASSERTED ? "asserted" : "released");
-		printf("Core1 loop:  %lu  isr: %lu\n",
-		       (unsigned long)core1_loop_count, (unsigned long)core1_isr_count);
-		printf("Last write:  %02X  last read: %02X\n",
-		       core1_last_write_loc, core1_last_read_loc);
-		registers::dump();
+	case CMD_STATUS: {
+		print_status();
+		/* Optional repeat: redraw every period ms until any key. */
+		uint32_t period = cmd.status.period;
+		while (period > 0u) {
+			for (uint32_t i = 0u; i < period; i++) {
+				usb_poll();
+				power_task();
+				if (getchar_timeout_us(0) != PICO_ERROR_TIMEOUT)
+					goto status_done;
+				sleep_ms(1u);
+			}
+			printf("%s%s", ANSI_CLEAR_SCREEN, ANSI_CURSOR_HOME);
+			print_status();
+		}
+status_done:
 		break;
+	}
+
+	case CMD_HELP:
+		// Keep this in step with the grammar in command_parser.y and the
+		// keyword table in command_lexer.l.  Every command has a two-letter
+		// alias except "help"; keywords and hex are case-insensitive.
+		printf(
+		"\nAll numbers are hex unless stated.  Two-letter aliases in brackets.\n"
+		"\n--- Registers ---\n"
+		"  examine            (ex)  dump the 8-byte register window\n"
+		"  modify <off> <b>.. (mo)  write bytes from offset off (0..7)\n"
+		"  fill [v]           (fi)  fill the window with v (default 00)\n"
+		"\n--- Host ---\n"
+		"  status [period]    (st)  status; period (decimal ms) repeats\n"
+		"                           until a key is pressed\n"
+		"  power              (pw)  show the sensed main 5V rail\n"
+		"  time [y m d h m s] (ti)  show or set the clock (decimal)\n"
+		"  usb <args>         (ub)  send words to the USB CDC guest console\n"
+		"  verbose            (vb)  toggle verbose output\n"
+		"  help               (h)   this text\n"
+		"\nThe peripheral follows the main 5V rail: bus and video serve only\n"
+		"while it is up; on power loss the firmware restarts into standby\n"
+		"(console only) and waits for power to return.\n\n");
+		break;
+
+	case CMD_POWER:
+		print_power();
+		break;
+
+	case CMD_TIME_QUERY:
+		print_time();
+		break;
+
+	case CMD_TIME_SET: {
+		tm tm = {};
+		tm.tm_mday  = 1;
+		tm.tm_year  = cmd.time.year - 1900;
+		if (cmd.time.count >= 2) tm.tm_mon  = cmd.time.month; /* already 0-based from grammar */
+		if (cmd.time.count >= 3) tm.tm_mday = cmd.time.day;
+		if (cmd.time.count >= 4) tm.tm_hour = cmd.time.hour;
+		if (cmd.time.count >= 5) tm.tm_min  = cmd.time.minute;
+		if (cmd.time.count >= 6) tm.tm_sec  = cmd.time.second;
+		aon_timer_set_time_calendar(&tm);
+		print_time();
+		break;
+	}
 
 	case CMD_EXAMINE:
 		registers::dump();
@@ -309,49 +391,44 @@ process_command(char *buf)
 }
 
 static constexpr char prompt[] = ">>> ";
+static bool console_prompted = false;
 
+// One console iteration: show the prompt if needed, pump USB, handle at most
+// one input character. Non-blocking, so the caller's loop can interleave
+// other Core 0 work (power sensing in particular) between characters. The
+// console runs in standby too — it must stay alive when main power is off.
 static void
-poll_console()
+poll_console_once()
 {
 	static char buf[COMMAND_BUFFER_LEN];
 	static int idx = 0;
-	static bool prompted = false;
 
-	while (!core1_initialised) {
-		sleep_ms(1u);
-		usb_poll();
+	if (!console_prompted) {
+		printf(prompt);
+		console_prompted = true;
 	}
-
-	print_time();
-
-	for (;;) {
-		if (!prompted) {
-			printf(prompt);
-			prompted = true;
-		}
-		// Poll USB before reading a character so that all chars delivered by
-		// this tud_task() call are visible to getchar_timeout_us().
-		usb_poll();
-		const int ch = getchar_timeout_us(0);
-		if (ch != PICO_ERROR_TIMEOUT) {
-			if (ch == '\r' || ch == '\n') {
-				putchar('\n');
-				buf[idx] = '\0';
-				process_command(buf);
-				idx = 0;
-				prompted = false;
-			} else if (ch == '\b' || ch == 0x7F) {
-				if (idx > 0) {
-					putchar('\b');
-					putchar(' ');
-					putchar('\b');
-					buf[--idx] = '\0';
-				}
-			} else if (idx < static_cast<int>(COMMAND_BUFFER_LEN) - 1 &&
-				   ch >= ' ' && ch < 0x7F) {
-				putchar(ch);
-				buf[idx++] = ch;
+	// Poll USB before reading a character so that all chars delivered by
+	// this tud_task() call are visible to getchar_timeout_us().
+	usb_poll();
+	const int ch = getchar_timeout_us(0);
+	if (ch != PICO_ERROR_TIMEOUT) {
+		if (ch == '\r' || ch == '\n') {
+			putchar('\n');
+			buf[idx] = '\0';
+			process_command(buf);
+			idx = 0;
+			console_prompted = false;
+		} else if (ch == '\b' || ch == 0x7F) {
+			if (idx > 0) {
+				putchar('\b');
+				putchar(' ');
+				putchar('\b');
+				buf[--idx] = '\0';
 			}
+		} else if (idx < static_cast<int>(COMMAND_BUFFER_LEN) - 1 &&
+			   ch >= ' ' && ch < 0x7F) {
+			putchar(ch);
+			buf[idx++] = ch;
 		}
 	}
 }
@@ -717,9 +794,22 @@ main()
 	aon_timer_stop();
 	aon_timer_start_calendar(&tm);
 
+	// Follow the host system's main 5V rail (ADC6, divide-by-2): the bus and
+	// video interfaces serve only while it is up. Unlike the main pico there
+	// is no power *control* here — the peripheral simply comes alive with
+	// power on. On power loss it reboots back into this standby (below).
+	power_init();
+	if (!power_is_on()) {
+		printf("Core0 standby: main 5V is absent — console only\n");
+		while (!power_is_on()) {
+			poll_console_once();
+			power_task();
+		}
+		printf("\nCore0 main 5V detected\n");
+		console_prompted = false;
+	}
+
 	// Bring up the bus peripheral and launch Core 1 (bus engine + video).
-	// This was previously gated by the removed 'power on' command; with no
-	// power command the peripheral now starts unconditionally at boot.
 	set_power();
 
 	printf("Core0 ready!\n");
@@ -730,5 +820,24 @@ main()
 		usb_poll();
 	}
 
-	poll_console();
+	print_time();
+
+	for (;;) {
+		poll_console_once();
+		power_task();
+
+		// Power lost: quiesce everything except the console. A clean reboot
+		// back into the standby wait above is the shutdown — every power
+		// cycle then gets a from-scratch bring-up, instead of trying to
+		// pause and resume the PIO state machines, the DMA chains and the
+		// video scan-out in place.
+		if (!power_is_on()) {
+			printf("\nCore0 main 5V lost — restarting into standby\n");
+			stdio_flush();
+			sleep_ms(20u);
+			watchdog_reboot(0u, 0u, 0u);
+			for (;;)
+				tight_loop_contents();
+		}
+	}
 }
