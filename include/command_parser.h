@@ -21,6 +21,7 @@ typedef enum cmd_tag {
 	CMD_VERBOSE,
 	CMD_STATUS,
 	CMD_POWER,
+	CMD_I2C_SCAN,
 	CMD_TIME_QUERY,
 	CMD_TIME_SET,
 

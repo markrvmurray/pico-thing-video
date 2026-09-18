@@ -97,6 +97,7 @@ static int _t_year, _t_month, _t_day, _t_hour, _t_minute, _t_second, _t_count;
 
 /* Command keywords */
 %token TOK_HELP
+%token TOK_I2C
 %token TOK_POWER
 %token TOK_TIME
 %token TOK_VERBOSE
@@ -122,6 +123,7 @@ start:
 
 command:
 	  help_cmd
+	| i2c_cmd
 	| power_cmd
 	| time_cmd
 	| verbose_cmd
@@ -142,6 +144,10 @@ help_cmd:
 
 power_cmd:
 	TOK_POWER { result->tag = CMD_POWER; }
+	;
+
+i2c_cmd:
+	TOK_I2C { result->tag = CMD_I2C_SCAN; }
 	;
 
 verbose_cmd:

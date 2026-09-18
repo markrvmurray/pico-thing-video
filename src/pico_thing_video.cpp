@@ -39,6 +39,7 @@
 #include "tusb.h"
 #include "usb.h"
 #include "power.h"
+#include "i2c_service.h"
 #include "registers.h"
 #include "pico_thing_video.h"
 #include "build_time.h"
@@ -310,6 +311,7 @@ status_done:
 		"  status [period]    (st)  status; period (decimal ms) repeats\n"
 		"                           until a key is pressed\n"
 		"  power              (pw)  show the sensed main 5V rail\n"
+		"  i2c                (ic)  report HPD and scan the HDMI DDC bus\n"
 		"  time [y m d h m s] (ti)  show or set the clock (decimal)\n"
 		"  usb <args>         (ub)  send words to the USB CDC guest console\n"
 		"  verbose            (vb)  toggle verbose output\n"
@@ -321,6 +323,10 @@ status_done:
 
 	case CMD_POWER:
 		print_power();
+		break;
+
+	case CMD_I2C_SCAN:
+		i2c_scan();
 		break;
 
 	case CMD_TIME_QUERY:
@@ -799,6 +805,7 @@ main()
 	// is no power *control* here — the peripheral simply comes alive with
 	// power on. On power loss it reboots back into this standby (below).
 	power_init();
+	i2c_service_init();
 	if (!power_is_on()) {
 		printf("Core0 standby: main 5V is absent — console only\n");
 		while (!power_is_on()) {

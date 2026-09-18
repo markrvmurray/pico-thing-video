@@ -75,6 +75,7 @@ match_command_keyword(const char *text)
 {
 	static const struct { const char *name; const char *alias; int tok; } kw[] = {
 		{ "help",    "h",  TOK_HELP    },
+		{ "i2c",     "ic", TOK_I2C     },
 		{ "power",   "pw", TOK_POWER   },
 		{ "time",    "ti", TOK_TIME    },
 		{ "verbose", "vb", TOK_VERBOSE },
