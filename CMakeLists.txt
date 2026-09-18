@@ -105,6 +105,7 @@ add_executable(pico-thing-video
 		src/usb.cpp
 		src/vid_link.cpp
 		src/video.cpp
+		src/video_render.cpp
 )
 
 # USB role-specific sources: the device build needs its descriptors; the host
