@@ -45,6 +45,7 @@
 #include "build_time.h"
 #include "command_parser.h"
 #include "video.h"
+#include "vid_link.h"
 
 /* Flex/bison generated scanner API (yy_buffer_state is flex's internal type) */
 extern "C" {
@@ -147,6 +148,11 @@ __time_critical_func(dma_bus_read_irq_handler())
 	const uintptr_t read_addr = dma_channel_hw_addr(piodma_read.data_channel)->read_addr;
 	read_location = read_addr & registers::register_mask;
 	read_irq_received = true;
+	// Pop-on-read for the link's Data register happens HERE, not in the
+	// Core 1 loop: every guest read gets its own ISR invocation (6809 bus
+	// reads are far slower than this tier's latency), so the pop can
+	// neither be lost to mailbox overwrite nor double-counted.
+	vid_link_guest_read(read_location);
 }
 
 // ISR for the R/!W bus write loop and DMA chain.
@@ -161,10 +167,12 @@ __time_critical_func(dma_bus_write_irq_handler())
 	const uintptr_t written_addr = dma_channel_hw_addr(piodma_write.data_channel)->write_addr;
 	const uint8_t wloc = written_addr & registers::register_mask;
 	const uint8_t wval = *reinterpret_cast<volatile uint8_t *>(written_addr);
-	// Mirror into the read side (scratch-register behaviour for the whole
-	// window). Device sub-registers with side effects override this in the
-	// Core 1 dispatch loop.
-	reg[wloc] = wval;
+	// Mirror into the read side (scratch-register behaviour for the
+	// reserved registers). The link offsets are NOT mirrored: their read
+	// side is device-owned (VID.Data stages the input head byte, VID.Stat
+	// the status), and a TxD write must not clobber it.
+	if (wloc > VID_STAT_OFFSET)
+		reg[wloc] = wval;
 	// Queue for Core 1.
 	const uint8_t h = write_ring_head;
 	const uint8_t next_h = (h + 1u) & WRITE_RING_MASK;
@@ -221,6 +229,7 @@ print_status()
 	       (unsigned long)core1_loop_count, (unsigned long)core1_isr_count);
 	printf("Last write:  %02X  last read: %02X\n",
 	       core1_last_write_loc, core1_last_read_loc);
+	vid_link_print_status();
 	registers::dump();
 }
 
@@ -496,6 +505,10 @@ core1_bringup()
 	printf("Core1 video demo drawn\n");
 #endif
 
+	// Bring the guest link up last: READY means everything above works.
+	vid_link_init();
+	printf("Core1 guest link ready (protocol version %u)\n", VID_STAT_VERSION);
+
 	printf("Core1 process started\n");
 	core1_initialised = true;
 }
@@ -514,8 +527,10 @@ __no_inline_not_in_flash_func(main_core1)()
 		// Observe host !RESET. On the asserting edge, clear the register
 		// window so the peripheral presents a clean slate to the host.
 		const bool reset_now = RESET_IS_ASSERTED;
-		if (reset_now && !reset_was_asserted)
+		if (reset_now && !reset_was_asserted) {
 			registers::clear();
+			vid_link_reset();	// flush FIFOs, restage Data/Stat
+		}
 		reset_was_asserted = reset_now;
 
 		// Drain guest writes. The byte was already mirrored to the read side
@@ -526,6 +541,11 @@ __no_inline_not_in_flash_func(main_core1)()
 			core1_last_write_loc = write_ring[t].location;
 			write_ring_tail = (t + 1u) & WRITE_RING_MASK;
 			switch (write_ring[t].location) {
+			case VID_DATA_OFFSET:
+			case VID_STAT_OFFSET:
+				vid_link_guest_write(write_ring[t].location,
+				    write_ring[t].value);
+				break;
 			default:
 				break;
 			}
@@ -536,10 +556,13 @@ __no_inline_not_in_flash_func(main_core1)()
 			read_irq_received = false;
 			core1_last_read_loc = read_location;
 			switch (read_location) {
-			default:
+			default:	// link pops happen in the read ISR itself
 				break;
 			}
 		}
+
+		// Service the console link: drain commands, restage Data/Stat.
+		vid_link_task();
 	}
 }
 
