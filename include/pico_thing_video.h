@@ -17,10 +17,14 @@ extern volatile bool verbose;
 #include "hardware/pio.h"
 
 // === Pin map ===
+// The first bracket is hardware-validation state, as in the main pico's
+// pico_thing.h: [Y] proven on hardware, [N] known bad, [ ] not yet exercised.
+// The second is direction: [i] input, [o] output, [o*] simulated
+// open-collector output, [io] bidirectional.
 enum {
 	// Console UART (UART0)
-	GPIO_UART_TX  = 0,	// [o]  RP2xxx UART Tx (console)
-	GPIO_UART_RX  = 1,	// [i]  RP2xxx UART Rx (console)
+	GPIO_UART_TX  = 0,	// [Y] [o]  RP2xxx UART Tx (console)
+	GPIO_UART_RX  = 1,	// [Y] [i]  RP2xxx UART Rx (console)
 
 	// USB-C front end (v2.0 PCB only; not connected on the Stamp XL carrier,
 	// where VBUS comes from the carrier's own switched USB-A port). Role
@@ -29,42 +33,42 @@ enum {
 	// device (Rd presented, VBUS off). !PowerFault is the TPS2051B's
 	// open-drain !FLT (10k pull-up on the board); low = overcurrent or
 	// overtemperature while sourcing VBUS.
-	GPIO_PWR_FAULT = 7,	// [i]  !FLT from the TPS2051B VBUS switch
-	GPIO_USB_ROLE  = 8,	// [o]  USB role select: 1 = host, 0 = device
+	GPIO_PWR_FAULT = 7,	// [ ] [i]  !FLT from the TPS2051B VBUS switch
+	GPIO_USB_ROLE  = 8,	// [ ] [o]  USB role select: 1 = host, 0 = device
 
 	// HDMI connector sideband (v2.0 PCB only; unused by the firmware so far)
-	GPIO_HPD      = 9,	// [i]  HDMI hot-plug detect
-	GPIO_DDC_SDA  = 10,	// [io] HDMI DDC (I2C1 SDA)
-	GPIO_DDC_SCL  = 11,	// [io] HDMI DDC (I2C1 SCL)
+	GPIO_HPD      = 9,	// [ ] [i]  HDMI hot-plug detect
+	GPIO_DDC_SDA  = 10,	// [ ] [io] HDMI DDC (I2C1 SDA)
+	GPIO_DDC_SCL  = 11,	// [ ] [io] HDMI DDC (I2C1 SCL)
 
 	// HSTX DVI output — 4 differential pairs on GP12-19 (Pico DVI Sock).
 	// Per-pair lane/clock assignment is board-gated in hstx_dvi_init()
 	// (video.cpp): SolderParty has CK on GP14/15; Pimoroni has CK on GP12/13.
-	GPIO_HSTX_BASE = 12,	// [o]  HSTX DVI base (GPIO_HSTX_COUNT pins)
+	GPIO_HSTX_BASE = 12,	// [Y] [o]  HSTX DVI base (GPIO_HSTX_COUNT pins)
 
 	// Host reset, observed (input)
-	GPIO_RESET    = 20,	// [i]  !RESET
+	GPIO_RESET    = 20,	// [Y] [i]  !RESET
 
 	// Interrupt back to the host CPU
-	GPIO_IRQ      = 21,	// [o*] !IRQ (simulated open-collector)
+	GPIO_IRQ      = 21,	// [ ] [o*] !IRQ (simulated open-collector; the one bus signal not yet proven)
 
 	// The timing-critical bus pins (E, Q, R/!W, A2-0, D7-0, !CS) and the two PIO
 	// trace pins are owned by the PIO programs and defined in
 	// pico_thing_video.pio (exported via pico_thing_video.pio.h). pioasm needs
 	// them at assembly time, so they cannot live in this header:
-//	GPIO_TRACE_RD = 23	// [o]  PIO bus-read trace (debug)
-//	GPIO_TRACE_WR = 24	// [o]  PIO bus-write trace (debug)
-//	GPIO_E        = 25	// [i]  E clock (supplied by host)
-//	GPIO_Q        = 26	// [i]  Q clock (supplied by host)
-//	GPIO_RW       = 27	// [i]  Bus R/!W
-//	GPIO_A_BASE   = 28	// [i]  Address bus, 3 pins (A2-0)
-//	GPIO_D_BASE   = 31	// [io] Data bus, 8 pins (D7-0)
-//	GPIO_CS       = 39	// [i]  Device !CS (above the D block)
+//	GPIO_TRACE_RD = 23	// [ ] [o]  PIO bus-read trace (debug)
+//	GPIO_TRACE_WR = 24	// [ ] [o]  PIO bus-write trace (debug)
+//	GPIO_E        = 25	// [Y] [i]  E clock (supplied by host)
+//	GPIO_Q        = 26	// [Y] [i]  Q clock (supplied by host)
+//	GPIO_RW       = 27	// [Y] [i]  Bus R/!W
+//	GPIO_A_BASE   = 28	// [Y] [i]  Address bus, 3 pins (A0 on 28, bit i on base+i)
+//	GPIO_D_BASE   = 31	// [Y] [io] Data bus, 8 pins (D0 on 31, bit i on base+i)
+//	GPIO_CS       = 39	// [Y] [i]  Device !CS (above the D block)
 
 	// Main-power sense (v2.0 PCB): the board's main 5V supply through a
 	// divide-by-2 resistor pair, so a healthy rail reads ~2.5 V. Sampled by
 	// power.cpp to follow the host system's power state automatically.
-	GPIO_PWR_SENSE = 46,	// [i]  ADC6: main 5V rail / 2
+	GPIO_PWR_SENSE = 46,	// [Y] [i]  ADC6: main 5V rail / 2
 };
 
 // HSTX drives GPIO_HSTX_COUNT consecutive pins starting at GPIO_HSTX_BASE.
