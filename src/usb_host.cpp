@@ -164,7 +164,8 @@ uk_cook(uint8_t kc, bool shift, bool caps)
 	case HID_KEY_9:             return shift ? '('  : '9';
 	case HID_KEY_0:             return shift ? ')'  : '0';
 
-	case HID_KEY_ENTER:         return '\n';
+	case HID_KEY_ENTER:         return 0x0D;  /* CR: the OS-9 line terminator
+	                                            * (and the M4 input contract) */
 	case HID_KEY_ESCAPE:        return 0x1B;
 	case HID_KEY_BACKSPACE:     return 0x08;
 	case HID_KEY_TAB:           return '\t';
