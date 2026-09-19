@@ -83,7 +83,12 @@ match_command_keyword(const char *text)
 		{ "examine", "ex", TOK_EXAMINE },
 		{ "modify",  "mo", TOK_MODIFY  },
 		{ "fill",    "fi", TOK_FILL    },
+#if !USB_HOST_MODE
+		/* Client-mode only: routes console words to the USB-CDC guest
+		 * console, which a host build does not have. In host builds the
+		 * word falls through as TOK_WORD -> "Unknown command". */
 		{ "usb",     "ub", TOK_USB     },
+#endif
 		{ NULL, NULL, 0 }
 	};
 

@@ -322,7 +322,9 @@ status_done:
 		"  power              (pw)  show the sensed main 5V rail\n"
 		"  i2c                (ic)  report HPD and scan the HDMI DDC bus\n"
 		"  time [y m d h m s] (ti)  show or set the clock (decimal)\n"
+#if !USB_HOST_MODE
 		"  usb <args>         (ub)  send words to the USB CDC guest console\n"
+#endif
 		"  verbose            (vb)  toggle verbose output\n"
 		"  help               (h)   this text\n"
 		"\nThe peripheral follows the main 5V rail: bus and video serve only\n"
@@ -384,6 +386,7 @@ status_done:
 		break;
 	}
 
+#if !USB_HOST_MODE
 	case CMD_USB: {
 		/* Send each space-separated word as a separate USB CDC write. */
 		char args[sizeof(cmd.usb.args)];
@@ -399,6 +402,7 @@ status_done:
 		usb_cdc_flush_n(0);
 		break;
 	}
+#endif /* !USB_HOST_MODE */
 
 	default:
 		break;
