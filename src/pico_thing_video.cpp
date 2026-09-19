@@ -40,6 +40,7 @@
 #include "usb.h"
 #include "power.h"
 #include "i2c_service.h"
+#include "chip_stepping.h"
 #include "registers.h"
 #include "pico_thing_video.h"
 #include "build_time.h"
@@ -222,6 +223,7 @@ static void
 print_status()
 {
 	printf("Verbose:     %s\n", verbose ? "on" : "off");
+	chip_stepping_print();
 	print_power();
 	printf("!RESET:      %s\n", RESET_IS_ASSERTED ? "asserted" : "released");
 	printf("!IRQ:        %s\n", IRQ_IS_ASSERTED ? "asserted" : "released");
@@ -784,6 +786,7 @@ main()
 
 	printf("\n\nPico2 MC6809E bus peripheral %s\n", DEVICE_VERSION);
 	printf("Pico2 MC6809E built on %s %s\n", __DATE__, __TIME__);
+	chip_stepping_print();
 
 #ifdef MEASURE_FREQS
 	measure_freqs();

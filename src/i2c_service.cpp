@@ -6,6 +6,7 @@
 #include "pico/stdlib.h"
 
 #include "pico_thing_video.h"
+#include "chip_stepping.h"
 #include "i2c_service.h"
 
 /* DDC is specified at 100 kHz; the EDID EEPROM in many sinks is no faster. */
@@ -23,11 +24,18 @@ i2c_service_init(void)
 	gpio_pull_up(GPIO_DDC_SCL);
 
 	/* Hot-plug detect: the sink drives it high (from the +5V we supply)
-	 * once its EDID is ready to read. Pull down so an empty socket reads
-	 * a clean "not connected". */
+	 * once its EDID is ready to read. The empty-socket low level wants a
+	 * pull-down — but on E9-afflicted steppings (A2) the INTERNAL
+	 * pull-down latches at ~2.1V once the pin has been driven high, so
+	 * there it is left disabled and the board's external 4k7 on GP9
+	 * defines the level. Fixed silicon (A3+) uses the internal pull-down,
+	 * which also coexists happily with the 4k7 when both are present. */
 	gpio_init(GPIO_HPD);
 	gpio_set_dir(GPIO_HPD, GPIO_IN);
-	gpio_pull_down(GPIO_HPD);
+	if (chip_has_erratum_e9())
+		gpio_disable_pulls(GPIO_HPD);
+	else
+		gpio_pull_down(GPIO_HPD);
 }
 
 /* The addresses HDMI itself assigns on the DDC bus. */

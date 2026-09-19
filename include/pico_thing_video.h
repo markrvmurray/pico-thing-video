@@ -37,7 +37,7 @@ enum {
 	GPIO_USB_ROLE  = 8,	// [ ] [o]  USB role select: 1 = host, 0 = device
 
 	// HDMI connector sideband (v2.0 PCB only; unused by the firmware so far)
-	GPIO_HPD      = 9,	// [ ] [i]  HDMI hot-plug detect
+	GPIO_HPD      = 9,	// [ ] [i]  HDMI hot-plug detect (external 4k7 pull-down: erratum E9)
 	GPIO_DDC_SDA  = 10,	// [ ] [io] HDMI DDC (I2C1 SDA)
 	GPIO_DDC_SCL  = 11,	// [ ] [io] HDMI DDC (I2C1 SCL)
 
