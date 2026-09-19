@@ -61,6 +61,14 @@ void vid_link_guest_read(uint8_t location);
 /* Per-loop service: drain the command FIFO, restage Data and Stat. */
 void vid_link_task(void);
 
+/* Enqueue one input byte for the guest (sets RDRF via the next restage).
+ * The M4 contract with the NitrOS-9 side: keystrokes are PLAIN bytes —
+ * printable characters and the control bytes a shell needs (CR, BS,
+ * Ctrl-C, ...), one byte per key. Called from the USB HID cooker on
+ * Core 0 (the RX ring is single-producer/single-consumer across cores;
+ * loopback, the only other producer, is a test mode). Drops when full. */
+void vid_link_input(uint8_t byte);
+
 /* Console diagnostics (Core 0; reads counters only). */
 void vid_link_print_status(void);
 

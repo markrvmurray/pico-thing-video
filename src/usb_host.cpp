@@ -25,7 +25,8 @@
 #include "tusb.h"
 
 #include "usb.h"
-#include "video.h"   /* screen geometry: FB_WIDTH/FB_HEIGHT, CHAR_W/H, TEXT_COLS/ROWS */
+#include "video.h"
+#include "vid_link.h"   /* screen geometry: FB_WIDTH/FB_HEIGHT, CHAR_W/H, TEXT_COLS/ROWS */
 
 /* Echo cooked events to the UART console (first-light bring-up aid). */
 #ifndef USB_HOST_ECHO
@@ -104,6 +105,9 @@ evt_name(uint8_t hdr)
 static void
 emit_key(uint8_t c)
 {
+	/* M4: keystrokes feed the guest console as plain bytes. The local
+	 * event FIFO and UART echo stay as diagnostics. */
+	vid_link_input(c);
 	evt_push(EVT_KEY);
 	evt_push(c);
 #if USB_HOST_ECHO
@@ -201,6 +205,8 @@ process_kbd(const hid_keyboard_report_t *r)
 {
 	bool shift = (r->modifier &
 		(KEYBOARD_MODIFIER_LEFTSHIFT | KEYBOARD_MODIFIER_RIGHTSHIFT)) != 0;
+	bool ctrl = (r->modifier &
+		(KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_RIGHTCTRL)) != 0;
 
 	for (int i = 0; i < 6; i++) {
 		uint8_t kc = r->keycode[i];
@@ -215,6 +221,13 @@ process_kbd(const hid_keyboard_report_t *r)
 		}
 
 		uint8_t c = uk_cook(kc, shift, caps_lock);
+		/* Ctrl chords: fold letters (and the usual @[\]^_ range) onto
+		 * the C0 controls the shell's editing chars live in. */
+		if (ctrl && c != 0) {
+			uint8_t u = (c >= 'a' && c <= 'z') ? (uint8_t)(c - 0x20) : c;
+			if (u >= 0x40 && u <= 0x5F)
+				c = (uint8_t)(u & 0x1F);
+		}
 		if (c != 0)
 			emit_key(c);
 	}

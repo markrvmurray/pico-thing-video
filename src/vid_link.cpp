@@ -99,6 +99,14 @@ vid_link_init(void)
 }
 
 extern "C" void
+vid_link_input(uint8_t byte)
+{
+	/* Core 0 producer: push only — Core 1's next task pass restages
+	 * Data/Stat (sub-microsecond), keeping all reg[] writes on one core. */
+	rx_push(byte);
+}
+
+extern "C" void
 __not_in_flash_func(vid_link_guest_write)(uint8_t location, uint8_t value)
 {
 	switch (location) {
