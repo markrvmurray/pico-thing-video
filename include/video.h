@@ -55,6 +55,7 @@ void vidterm_putch(int col, int row, uint8_t ch, uint8_t attr);
 void vidterm_puts(int col, int row, const char *s, uint8_t attr);
 void vidterm_clear(uint8_t ch, uint8_t attr);
 void vidterm_refresh(void);   /* blit dirty text cells into the framebuffer */
+void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr); /* text grid up one row */
 void vidterm_present(void);   /* wait for vsync */
 
 /* ── Graphics layer (RGB332) ────────────────────────────────────────────── */

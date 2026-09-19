@@ -91,7 +91,10 @@ blit_char_cell(int col, int row)
 
     uint8_t fg = attr_to_fg(attr);
     uint8_t bg = attr_to_bg(attr);
-    bool transparent = (bg == TRANSPARENT_BG);
+    /* Transparency is the attr's bit0 flag, NOT a colour sentinel: opaque
+     * black (attr bg bits 000, bit0 clear) must paint its background,
+     * or glyph overwrites and scrolls leave ghosts of the old pixels. */
+    bool transparent = (attr & 0x01) != 0;
 
     int x = col * CHAR_W;
     int y = row * CHAR_H;
@@ -167,6 +170,22 @@ void vidterm_clear(uint8_t ch, uint8_t attr)
 void vidterm_refresh(void)
 {
     render_dirty_cells();
+}
+
+void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr)
+{
+    memmove(text_cells[0], text_cells[1], (TEXT_ROWS - 1) * TEXT_COLS);
+    memmove(text_attrs[0], text_attrs[1], (TEXT_ROWS - 1) * TEXT_COLS);
+    memset(text_cells[TEXT_ROWS - 1], fill_ch, TEXT_COLS);
+    memset(text_attrs[TEXT_ROWS - 1], fill_attr, TEXT_COLS);
+    /* Every cell moved: mark the whole grid dirty (same masking as
+     * vidterm_clear). */
+    for (int r = 0; r < TEXT_ROWS; r++) {
+        for (int w = 0; w < DIRTY_WORDS; w++)
+            dirty_rows[r][w] = 0xFFFFFFFF;
+        if (TEXT_COLS & 31)
+            dirty_rows[r][DIRTY_WORDS - 1] = (1u << (TEXT_COLS & 31)) - 1;
+    }
 }
 
 /* ───────────────────────── public API (graphics layer) ──────────────────── */
