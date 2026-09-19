@@ -60,6 +60,7 @@ void vidterm_present(void);   /* wait for vsync */
 
 /* ── Graphics layer (RGB332) ────────────────────────────────────────────── */
 void vidterm_plot(int x, int y, uint8_t colour);
+void vidterm_line(int x0, int y0, int x1, int y1, uint8_t colour);
 void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour);
 void vidterm_hline(int x, int y, int len, uint8_t colour);
 void vidterm_vline(int x, int y, int len, uint8_t colour);
