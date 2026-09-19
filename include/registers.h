@@ -41,7 +41,7 @@ private:
 		size_t i;
 		operator uint8_t() const { return read_registers[i]; }
 		explicit operator uint16_t() const { return __builtin_bswap16(*reinterpret_cast<volatile uint16_t*>(&read_registers[i])); }
-		explicit operator float() const { uint32_t u = __builtin_bswap32(*reinterpret_cast<volatile uint32_t*>(&read_registers[i])); float f; std::memcpy(&f,&u,sizeof f); return f; }		ReadProxy& operator=(volatile uint8_t v){ read_registers[i] = v; return *this; }
+		explicit operator float() const { uint32_t u = __builtin_bswap32(*reinterpret_cast<volatile uint32_t*>(&read_registers[i])); float f; std::memcpy(&f,&u,sizeof f); return f; }		ReadProxy& operator=(uint8_t v){ read_registers[i] = v; return *this; }
 		ReadProxy& operator=(uint16_t v) { *reinterpret_cast<volatile uint16_t*>(&read_registers[i]) = __builtin_bswap16(v); return *this; }
 		ReadProxy& operator=(float v) { uint32_t u; std::memcpy(&u, &v, sizeof u); *reinterpret_cast<volatile uint32_t*>(&read_registers[i]) = __builtin_bswap32(u); return *this; }
 		bool operator==(uint8_t v) const { return read_registers[i] == v; }
@@ -72,7 +72,7 @@ public:
 	registers& operator=(const registers&) = delete;
 	ReadProxy operator[](uint16_t i) const { return ReadProxy{static_cast<uint16_t>(i&(register_length - 1))}; }
 	static WriteProxy write(uint16_t i) { return WriteProxy{static_cast<uint16_t>(i&(register_length - 1)), write_registers}; }
-	static void clear() { for (uint16_t i = 0; i < register_length; i++) read_registers[i] = write_registers[i] = 0u; }
+	static void clear() { for (uint16_t i = 0; i < register_length; i++) { read_registers[i] = 0u; write_registers[i] = 0u; } }
 	static void copy_in(uint16_t addr, const uint8_t *src, uint16_t len);
 	static void copy_out(uint8_t *dst, uint16_t addr, uint16_t len);
 	static void copy_out_write(uint8_t *dst, uint16_t addr, uint16_t len);

@@ -54,11 +54,11 @@ static void
 rx_push(uint8_t b)
 {
 	if (rx_level() >= RX_FIFO_SIZE) {
-		stat_rx_overruns++;
+		stat_rx_overruns = stat_rx_overruns + 1u;
 		return;
 	}
 	rx_fifo[rx_head & RX_FIFO_MASK] = b;
-	rx_head++;
+	rx_head = rx_head + 1u;
 }
 
 /* Restage the guest-visible Data and Stat bytes from FIFO state. Idempotent;
@@ -106,8 +106,8 @@ __not_in_flash_func(vid_link_guest_write)(uint8_t location, uint8_t value)
 		 * wrote without polling — drop, as agreed (graceful, no hang). */
 		if (tx_level() < TX_FIFO_SIZE) {
 			tx_fifo[tx_head & TX_FIFO_MASK] = value;
-			tx_head++;
-			stat_tx_accepted++;
+			tx_head = tx_head + 1u;
+			stat_tx_accepted = stat_tx_accepted + 1u;
 		}
 		break;
 	case VID_STAT_OFFSET:
@@ -129,8 +129,8 @@ __not_in_flash_func(vid_link_guest_read)(uint8_t location)
 	 * Data read gets its own ISR invocation at 6809 bus rates, so pops
 	 * cannot be lost or double-counted. */
 	if (location == VID_DATA_OFFSET && rx_level() > 0u) {
-		rx_tail++;
-		stat_rx_popped++;
+		rx_tail = rx_tail + 1u;
+		stat_rx_popped = stat_rx_popped + 1u;
 		restage();
 	}
 }
@@ -142,8 +142,8 @@ __not_in_flash_func(vid_link_task)(void)
 	 * M1 replaces this with the glyph renderer. */
 	while (tx_tail != tx_head) {
 		const uint8_t b = tx_fifo[tx_tail & TX_FIFO_MASK];
-		tx_tail++;
-		stat_tx_consumed++;
+		tx_tail = tx_tail + 1u;
+		stat_tx_consumed = stat_tx_consumed + 1u;
 		stat_last_byte = b;
 		if (loopback)
 			rx_push(b);
