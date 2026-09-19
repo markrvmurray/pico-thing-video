@@ -103,6 +103,7 @@ add_executable(pico-thing-video
 		src/i2c_service.cpp
 		src/registers.cpp
 		src/usb.cpp
+		src/vid_console.cpp
 		src/vid_link.cpp
 		src/video.cpp
 		src/video_render.cpp

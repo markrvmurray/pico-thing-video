@@ -86,6 +86,7 @@ vid_link_reset(void)
 {
 	tx_tail = tx_head;
 	rx_tail = rx_head;
+	vid_link_consume_reset();
 	restage();
 }
 
@@ -138,16 +139,24 @@ __not_in_flash_func(vid_link_guest_read)(uint8_t location)
 extern "C" void
 __not_in_flash_func(vid_link_task)(void)
 {
-	/* Drain the command FIFO. M0 consumer: count, remember, loop back.
-	 * M1 replaces this with the glyph renderer. */
+	/* Drain the command FIFO. Loopback (M0 test mode) diverts bytes to
+	 * the input FIFO; otherwise they feed the console layer. */
+	bool consumed = false;
+
 	while (tx_tail != tx_head) {
 		const uint8_t b = tx_fifo[tx_tail & TX_FIFO_MASK];
 		tx_tail = tx_tail + 1u;
 		stat_tx_consumed = stat_tx_consumed + 1u;
 		stat_last_byte = b;
-		if (loopback)
+		if (loopback) {
 			rx_push(b);
+		} else {
+			vid_link_consume(b);
+			consumed = true;
+		}
 	}
+	if (consumed)
+		vid_link_consume_flush();
 	restage();
 }
 
