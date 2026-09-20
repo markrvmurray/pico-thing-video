@@ -67,6 +67,40 @@ i2c_scan(void)
 	printf("HPD: %s\n", gpio_get(GPIO_HPD) ?
 	    "high (sink present, EDID ready)" : "low (no sink detected)");
 
+	/* Raw line levels, as a hardware diagnostic. A powered sink's DDC
+	 * pull-ups hold both lines firmly high; "high" on only the weak
+	 * internal pull-ups (or a stuck-low line) points at missing +5V on
+	 * HDMI pin 18, an adapter without the sideband pins, or soldering. */
+	printf("Lines: SDA %s, SCL %s (idle should be high)\n",
+	    gpio_get(GPIO_DDC_SDA) ? "high" : "LOW",
+	    gpio_get(GPIO_DDC_SCL) ? "high" : "LOW");
+
+	/* Line-charge test: detect EXTERNAL pull-ups without a meter. Drive
+	 * the line low, float it with no internal pulls (E9-safe: nothing
+	 * holds it in the latch band), and sample a few microseconds later.
+	 * A powered sink's ~2k DDC pull-ups snap it high immediately; a dead
+	 * sideband (no +5V at HDMI pin 18, an adapter without pins 15/16, a
+	 * dry joint) leaves the line's capacitance sitting near ground. */
+	static const struct { const char *name; uint gpio; } ddc_lines[] = {
+		{ "SDA", GPIO_DDC_SDA },
+		{ "SCL", GPIO_DDC_SCL },
+	};
+	for (unsigned i = 0; i < 2u; i++) {
+		const uint g = ddc_lines[i].gpio;
+		gpio_init(g);			/* SIO, input, no pulls */
+		gpio_disable_pulls(g);
+		gpio_put(g, false);
+		gpio_set_dir(g, GPIO_OUT);	/* discharge the line */
+		busy_wait_us(10);
+		gpio_set_dir(g, GPIO_IN);	/* float */
+		busy_wait_us(5);
+		printf("%s external pull-up: %s\n", ddc_lines[i].name,
+		    gpio_get(g) ? "YES (sink DDC side is powered)"
+		                : "no (line stayed low)");
+		gpio_set_function(g, GPIO_FUNC_I2C);	/* restore the bus */
+		gpio_pull_up(g);
+	}
+
 	printf("Scanning I2C1 (HDMI DDC, SDA GP%d / SCL GP%d) 08-77...\n",
 	       GPIO_DDC_SDA, GPIO_DDC_SCL);
 	/* 0x00-0x07 and 0x78-0x7F are reserved by the I2C spec; probing them
