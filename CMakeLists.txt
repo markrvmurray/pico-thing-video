@@ -25,7 +25,12 @@ include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 # console is unavailable — the console stays on UART0. This one switch drives
 # both the linked TinyUSB target and the -DUSB_HOST_MODE compile flag that
 # tusb_config.h and the sources key off, so the two can never drift apart.
-option(USB_HOST_MODE "Build USB as HID host (keyboard+mouse) instead of CDC device" OFF)
+# Default ON since the hardware-bring-up era (2026-09): the keyboard is the
+# point of the port, and the default must survive CLion regenerating its
+# build trees' caches from profile options. The device/CDC role remains fully
+# supported — configure with -DUSB_HOST_MODE=OFF (the build/ regression tree
+# pins it OFF).
+option(USB_HOST_MODE "Build USB as HID host (keyboard+mouse) instead of CDC device" ON)
 
 # Flex and bison run on the BUILD HOST; the generated .c files are
 # cross-compiled for RP2350 by arm-none-eabi-gcc.
