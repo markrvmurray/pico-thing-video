@@ -33,13 +33,13 @@ enum {
 	// device (Rd presented, VBUS off). !PowerFault is the TPS2051B's
 	// open-drain !FLT (10k pull-up on the board); low = overcurrent or
 	// overtemperature while sourcing VBUS.
-	GPIO_PWR_FAULT = 7,	// [ ] [i]  !FLT from the TPS2051B VBUS switch
-	GPIO_USB_ROLE  = 8,	// [ ] [o]  USB role select: 1 = host, 0 = device
+	GPIO_PWR_FAULT = 7,	// [Y] [i]  !FLT from the TPS2051B VBUS switch (unfaulted state proven; fault path untested)
+	GPIO_USB_ROLE  = 8,	// [Y] [o]  USB role select: 1 = host, 0 = device
 
 	// HDMI connector sideband (v2.0 PCB only; unused by the firmware so far)
 	GPIO_HPD      = 9,	// [Y] [i]  HDMI hot-plug detect (external 4k7 pull-down: erratum E9)
-	GPIO_DDC_SDA  = 10,	// [ ] [io] HDMI DDC (I2C1 SDA)
-	GPIO_DDC_SCL  = 11,	// [ ] [io] HDMI DDC (I2C1 SCL)
+	GPIO_DDC_SDA  = 10,	// [Y] [io] HDMI DDC (I2C1 SDA)
+	GPIO_DDC_SCL  = 11,	// [Y] [io] HDMI DDC (I2C1 SCL)
 
 	// HSTX DVI output — 4 differential pairs on GP12-19 (Pico DVI Sock).
 	// Per-pair lane/clock assignment is board-gated in hstx_dvi_init()
