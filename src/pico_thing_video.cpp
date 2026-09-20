@@ -411,7 +411,7 @@ status_done:
 	}
 }
 
-static constexpr char prompt[] = ">>> ";
+static constexpr char prompt[] = "==> ";
 static bool console_prompted = false;
 
 // One console iteration: show the prompt if needed, pump USB, handle at most
