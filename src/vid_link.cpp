@@ -32,6 +32,7 @@ static bool     loopback;
 /* Diagnostics for the console 'status' command. */
 static volatile uint32_t stat_tx_accepted;	/* bytes taken off the bus */
 static volatile uint32_t stat_tx_consumed;	/* bytes eaten by the consumer */
+static volatile uint32_t stat_rx_pushed;	/* bytes accepted into the input FIFO */
 static volatile uint32_t stat_rx_popped;	/* Data reads that dequeued */
 static volatile uint32_t stat_rx_overruns;	/* loopback pushes dropped */
 static volatile uint8_t  stat_last_byte;
@@ -59,6 +60,7 @@ rx_push(uint8_t b)
 	}
 	rx_fifo[rx_head & RX_FIFO_MASK] = b;
 	rx_head = rx_head + 1u;
+	stat_rx_pushed = stat_rx_pushed + 1u;
 }
 
 /* Restage the guest-visible Data and Stat bytes from FIFO state. Idempotent;
@@ -171,11 +173,15 @@ __not_in_flash_func(vid_link_task)(void)
 extern "C" void
 vid_link_print_status(void)
 {
-	printf("Link:        %s%s, ver %u; tx acc %lu cons %lu, rx pop %lu ovr %lu, last %02X\n",
+	printf("Link:        %s%s, ver %u; tx acc %lu cons %lu, last %02X\n",
 	       ready ? "ready" : "down",
 	       loopback ? ", loopback" : "",
 	       (unsigned)VID_STAT_VERSION,
 	       (unsigned long)stat_tx_accepted, (unsigned long)stat_tx_consumed,
-	       (unsigned long)stat_rx_popped, (unsigned long)stat_rx_overruns,
 	       stat_last_byte);
+	printf("Input:       recv %lu pop %lu pending %u ovr %lu; RDRF %s\n",
+	       (unsigned long)stat_rx_pushed, (unsigned long)stat_rx_popped,
+	       (unsigned)rx_level(),
+	       (unsigned long)stat_rx_overruns,
+	       (reg[VID_STAT_OFFSET] & VID_STAT_RDRF) ? "set" : "clear");
 }
