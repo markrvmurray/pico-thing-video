@@ -177,6 +177,34 @@ pico_enable_stdio_uart(pico-thing-video 1)
 
 pico_add_extra_outputs(pico-thing-video)
 
+# Keep the merged clangd database in step with the build automatically.
+#
+# Neither build tree's compile_commands.json is complete on its own (each USB
+# role compiles a source the other does not), so clangd is pointed at a merged
+# union at the repo root. That union used to be produced by hand, which meant
+# it silently described stale flags — or a source that no longer existed —
+# until someone remembered to re-run the script.
+#
+# The refresh hangs off POST_BUILD rather than the configure step on purpose:
+# CMake writes each tree's compile_commands.json while GENERATING, so anything
+# run during configure would merge the previous run's data and defeat the
+# point. Building is also what actually follows a reconfigure in practice.
+#
+# The tree being built is passed as the primary, so shared sources are
+# described with the flags of whichever role was compiled last — matching what
+# the developer is working on — and the script finds a tree supplying the other
+# role by itself. This is a developer convenience, so a failure here (no jq, a
+# read-only source tree) must never fail the build.
+if(CMAKE_HOST_UNIX)
+	add_custom_command(TARGET pico-thing-video POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E env
+			${CMAKE_CURRENT_LIST_DIR}/scripts/merge-compile-commands.sh
+			$<SHELL_PATH:${CMAKE_BINARY_DIR}> || ${CMAKE_COMMAND} -E true
+		WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+		COMMENT "Refreshing merged compile_commands.json for clangd"
+		VERBATIM)
+endif()
+
 # Run from flash/XIP rather than copying the whole image to SRAM: the ~495 KB
 # video framebuffer needs that SRAM. The timing-critical bus code stays resident
 # in RAM regardless, via __time_critical_func / __not_in_flash_func / __scratch.

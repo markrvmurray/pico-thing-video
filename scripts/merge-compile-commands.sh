@@ -16,18 +16,62 @@
 #   e.g.  scripts/merge-compile-commands.sh              # build-host wins
 #         scripts/merge-compile-commands.sh build build-host   # device wins
 #
-# Re-run after (re)configuring either build — the merged file is a static
-# snapshot, unlike the old build/ symlink. Requires jq.
+# With SECONDARY omitted it is DISCOVERED by role rather than assumed by name:
+# the script works out which role PRIMARY holds (by which of the two role-only
+# sources its database mentions) and picks any other build tree supplying the
+# opposite role.  That keeps the union correct for build trees this script has
+# never heard of — IDE-generated ones included — instead of only the two
+# conventionally named directories.
+#
+# CMake runs this after every firmware build (see the POST_BUILD hook), passing
+# the tree being built as PRIMARY, so the merged database tracks whichever role
+# was compiled last and cannot silently go stale.  Requires jq.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."          # repo root
 
-PRIMARY="${1:-build-host}"
-SECONDARY="${2:-build}"
 OUT="compile_commands.json"
 
 command -v jq >/dev/null || { echo "error: jq not found" >&2; exit 1; }
+
+# The two sources that exist in exactly one role each; a database naming one
+# of them identifies its tree's role.
+HOST_ONLY="usb_host.cpp"
+DEVICE_ONLY="usb_descriptors.cpp"
+
+db_has() { [ -f "$1/compile_commands.json" ] && grep -q "$2" "$1/compile_commands.json"; }
+
+PRIMARY="${1:-}"
+if [ -z "$PRIMARY" ]; then
+	# No preference given: prefer a host tree, else whatever exists.
+	for d in build-host build; do
+		[ -f "$d/compile_commands.json" ] && PRIMARY="$d" && break
+	done
+	PRIMARY="${PRIMARY:-build-host}"
+fi
+PRIMARY="${PRIMARY%/}"
+
+SECONDARY="${2:-}"
+if [ -z "$SECONDARY" ]; then
+	# Which role does PRIMARY lack?  Find any tree that supplies it.
+	if db_has "$PRIMARY" "$HOST_ONLY"; then
+		want="$DEVICE_ONLY"
+	elif db_has "$PRIMARY" "$DEVICE_ONLY"; then
+		want="$HOST_ONLY"
+	else
+		want=""          # PRIMARY has neither (or no database) — nothing to complete
+	fi
+	if [ -n "$want" ]; then
+		for d in build-host build cmake-build-*; do
+			[ "${d%/}" = "$PRIMARY" ] && continue
+			if db_has "$d" "$want"; then
+				SECONDARY="${d%/}"
+				break
+			fi
+		done
+	fi
+fi
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
@@ -35,7 +79,7 @@ trap 'rm -f "$tmp"' EXIT
 p="$PRIMARY/compile_commands.json"
 s="$SECONDARY/compile_commands.json"
 
-if [[ -f "$p" && -f "$s" ]]; then
+if [[ -n "$SECONDARY" && -f "$p" && -f "$s" ]]; then
 	# All PRIMARY entries, plus SECONDARY entries whose file PRIMARY lacks.
 	jq -s '
 		.[0] as $p | .[1] as $s |
@@ -44,11 +88,10 @@ if [[ -f "$p" && -f "$s" ]]; then
 	' "$p" "$s" > "$tmp"
 	echo "merged: $PRIMARY (primary) + $SECONDARY -> $OUT ($(jq length "$tmp") entries)"
 elif [[ -f "$p" ]]; then
-	cp "$p" "$tmp"; echo "only $PRIMARY present -> $OUT"
-elif [[ -f "$s" ]]; then
-	cp "$s" "$tmp"; echo "only $SECONDARY present -> $OUT"
+	cp "$p" "$tmp"
+	echo "no complementary role found -> $OUT ($PRIMARY only)"
 else
-	echo "error: no compile_commands.json in $PRIMARY or $SECONDARY" >&2
+	echo "error: no compile_commands.json in $PRIMARY" >&2
 	exit 1
 fi
 
