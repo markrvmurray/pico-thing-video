@@ -142,6 +142,7 @@ claim_screen(void)
 {
 	clear_all();
 	claimed = true;
+	vidterm_cursor_enable(cursor_shown);
 }
 
 static void
@@ -276,6 +277,15 @@ xy_param(uint8_t b, int limit)
 }
 
 extern "C" void
+vid_link_consume_begin(void)
+{
+	/* Lift the cursor before anything draws: it lives in the framebuffer,
+	 * so a glyph or graphics primitive landing on it would be undone when
+	 * the saved pixels were put back. */
+	vidterm_cursor_hide();
+}
+
+extern "C" void
 vid_link_consume(uint8_t b)
 {
 	if (!claimed)
@@ -399,6 +409,13 @@ vid_link_consume_flush(void)
 		dirty = false;
 		vidterm_refresh();
 	}
+	/* Park the cursor wherever the burst left it. Doing this per burst
+	 * rather than per byte keeps a fast-moving cursor from flickering
+	 * through every intermediate cell of a line of output. */
+	if (claimed) {
+		vidterm_cursor_set(cur_col, cur_row);
+		vidterm_cursor_enable(cursor_shown);
+	}
 }
 
 extern "C" void
@@ -408,6 +425,7 @@ vid_link_consume_reset(void)
 	claimed = false;
 	state = ST_NORMAL;
 	cursor_shown = true;
+	vidterm_cursor_enable(false);	/* nothing owns the screen again */
 	cur_col = 0;
 	cur_row = 0;
 	dirty = false;

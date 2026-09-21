@@ -285,8 +285,89 @@ void vidterm_circle(int cx, int cy, int radius, uint8_t colour)
 
 /* ─────────────────────────────── bring-up ───────────────────────────────── */
 
+/* Cursor state (see video_render.h for why none of this runs in an ISR). */
+int               video_cursor_col;
+int               video_cursor_row;
+bool              video_cursor_enabled;
+volatile uint32_t video_frames;
+
+static uint8_t cursor_save[CHAR_H][CHAR_W];   /* pixels the cursor covers */
+static bool    cursor_drawn;
+static int     cursor_drawn_col;
+static int     cursor_drawn_row;
+static uint32_t cursor_shown_at;              /* video_frames when last shown */
+
+void vidterm_cursor_hide(void)
+{
+    if (!cursor_drawn)
+        return;
+    const int x = cursor_drawn_col * CHAR_W;
+    const int y = cursor_drawn_row * CHAR_H;
+    for (int gy = 0; gy < CHAR_H; gy++)
+        memcpy(&video_framebuffer[y + gy][x], cursor_save[gy], CHAR_W);
+    cursor_drawn = false;
+}
+
+void vidterm_cursor_service(void)
+{
+    /* Blink phase. A move restarts the cycle (cursor_shown_at), so the cursor
+     * is always visible the instant it arrives somewhere — blinking off on
+     * arrival reads as a dropped keystroke. */
+    const bool phase =
+        (((video_frames - cursor_shown_at) / VIDEO_CURSOR_BLINK_FRAMES) & 1u) == 0u;
+    const bool want = video_cursor_enabled && phase;
+
+    if (cursor_drawn && (!want ||
+        cursor_drawn_col != video_cursor_col ||
+        cursor_drawn_row != video_cursor_row))
+        vidterm_cursor_hide();
+
+    if (!want || cursor_drawn)
+        return;
+
+    /* Invert the cell: over white-on-black text this is the classic block
+     * cursor, and the glyph beneath stays legible in reverse video. */
+    const int x = video_cursor_col * CHAR_W;
+    const int y = video_cursor_row * CHAR_H;
+    for (int gy = 0; gy < CHAR_H; gy++) {
+        uint8_t *line = &video_framebuffer[y + gy][x];
+        memcpy(cursor_save[gy], line, CHAR_W);
+        for (int gx = 0; gx < CHAR_W; gx++)
+            line[gx] = (uint8_t)~line[gx];
+    }
+    cursor_drawn = true;
+    cursor_drawn_col = video_cursor_col;
+    cursor_drawn_row = video_cursor_row;
+}
+
+void vidterm_cursor_set(int col, int row)
+{
+    if (col < 0) col = 0;
+    if (col >= TEXT_COLS) col = TEXT_COLS - 1;
+    if (row < 0) row = 0;
+    if (row >= TEXT_ROWS) row = TEXT_ROWS - 1;
+    if (col != video_cursor_col || row != video_cursor_row)
+        cursor_shown_at = video_frames;   /* restart the blink cycle */
+    video_cursor_col = col;
+    video_cursor_row = row;
+}
+
+void vidterm_cursor_enable(bool on)
+{
+    if (on && !video_cursor_enabled)
+        cursor_shown_at = video_frames;
+    video_cursor_enabled = on;
+    if (!on)
+        vidterm_cursor_hide();
+}
+
 void video_render_init(void)
 {
+    video_cursor_col = 0;
+    video_cursor_row = 0;
+    video_cursor_enabled = false;   /* nothing owns the screen yet */
+    cursor_drawn = false;
+
     memset(video_framebuffer, 0, sizeof(video_framebuffer));
     memset(text_cells, 0, sizeof(text_cells));
     memset(text_attrs, 0, sizeof(text_attrs));

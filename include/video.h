@@ -56,6 +56,18 @@ void vidterm_puts(int col, int row, const char *s, uint8_t attr);
 void vidterm_clear(uint8_t ch, uint8_t attr);
 void vidterm_refresh(void);   /* blit dirty text cells into the framebuffer */
 void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr); /* text grid up one row */
+
+/* Text cursor. A blinking block, drawn by inverting the cell it sits on, so
+ * the character underneath stays readable. It is composited during scan-out
+ * and never written into the framebuffer, so moving it cannot disturb text or
+ * graphics and it needs no save-under. */
+void vidterm_cursor_set(int col, int row);
+void vidterm_cursor_enable(bool on);
+/* Lift the cursor out of the framebuffer before anything else draws. */
+void vidterm_cursor_hide(void);
+/* Draw, move or blink it as required; call from the service loop, never from
+ * an interrupt. Cheap when nothing has changed. */
+void vidterm_cursor_service(void);
 void vidterm_present(void);   /* wait for vsync */
 
 /* ── Graphics layer (RGB332) ────────────────────────────────────────────── */

@@ -153,6 +153,9 @@ __not_in_flash_func(vid_link_task)(void)
 	 * the input FIFO; otherwise they feed the console layer. */
 	bool consumed = false;
 
+	if (tx_tail != tx_head && !loopback)
+		vid_link_consume_begin();
+
 	while (tx_tail != tx_head) {
 		const uint8_t b = tx_fifo[tx_tail & TX_FIFO_MASK];
 		tx_tail = tx_tail + 1u;

@@ -46,6 +46,7 @@
 #include "build_time.h"
 #include "command_parser.h"
 #include "video.h"
+#include "video_render.h"   // video_frames, the cursor blink timebase
 #include "vid_link.h"
 
 /* Flex/bison generated scanner API (yy_buffer_state is flex's internal type) */
@@ -584,6 +585,24 @@ __no_inline_not_in_flash_func(main_core1)()
 
 		// Service the console link: drain commands, restage Data/Stat.
 		vid_link_task();
+
+		// Draw/blink the cursor here rather than in the scanline IRQ:
+		// that handler must only swap a pointer (see video.cpp).
+		//
+		// ONCE PER FRAME, not once per pass. This loop spins millions of
+		// times a second and is otherwise RAM-resident; the cursor code
+		// lives in flash, so calling it every pass floods the bus with XIP
+		// fetches and starves the scanline DMA until the display drops
+		// sync. A frame's granularity is imperceptible for a cursor and
+		// costs nothing.
+		{
+			static uint32_t serviced_frame;
+			const uint32_t f = video_frames;
+			if (f != serviced_frame) {
+				serviced_frame = f;
+				vidterm_cursor_service();
+			}
+		}
 	}
 }
 

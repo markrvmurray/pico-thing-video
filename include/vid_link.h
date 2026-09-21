@@ -74,10 +74,13 @@ void vid_link_print_status(void);
 
 /* The consumer contract: the glass-TTY / command-interpreter layer
  * (vid_console.cpp — portable, shared with the simulator) implements
- * these. consume() gets each command byte in order when loopback is off;
+ * these. consume_begin() precedes each burst (the console uses it to lift
+ * the cursor out of the way before anything draws); consume() gets each
+ * command byte in order when loopback is off;
  * consume_flush() follows each drained burst (batch a refresh there);
  * consume_reset() accompanies every link reset (power-on, Ctl RESET,
  * host !RESET). */
+void vid_link_consume_begin(void);
 void vid_link_consume(uint8_t byte);
 void vid_link_consume_flush(void);
 void vid_link_consume_reset(void);

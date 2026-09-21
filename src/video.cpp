@@ -147,7 +147,15 @@ void __not_in_flash_func(dma_irq_handler)(void)
         ch->transfer_count = count_of(vactive_line);
         vactive_cmdlist_posted = true;
     } else {
-        /* Pixel data: DMA reads directly from SRAM framebuffer */
+        /* Pixel data: DMA reads directly from SRAM framebuffer.
+         *
+         * Nothing may be composited here. This handler has only the
+         * duration of the in-flight transfer to re-arm the finished
+         * channel, and copying even one scanline (let alone through a
+         * flash-resident memcpy) overruns that budget and breaks the HSTX
+         * stream outright — the display loses sync and blanks. Overlays
+         * such as the cursor are drawn into the framebuffer from the
+         * service loop instead. */
         uint line = v_scanline - VBLANK_END;
         ch->read_addr = (uintptr_t)video_framebuffer[line];
         ch->transfer_count = FB_WIDTH / sizeof(uint32_t);
@@ -156,8 +164,10 @@ void __not_in_flash_func(dma_irq_handler)(void)
 
     if (!vactive_cmdlist_posted) {
         v_scanline = (v_scanline + 1) % MODE_V_TOTAL_LINES;
-        if (v_scanline == 0)
+        if (v_scanline == 0) {
             vsync_flag = true;
+            video_frames = video_frames + 1;   /* blink timebase (volatile: not ++) */
+        }
     }
 }
 
