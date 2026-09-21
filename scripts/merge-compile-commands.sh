@@ -86,14 +86,23 @@ if [[ -n "$SECONDARY" && -f "$p" && -f "$s" ]]; then
 		($p | map(.file)) as $pf |
 		$p + ($s | map(.file as $f | select($pf | index($f) | not)))
 	' "$p" "$s" > "$tmp"
-	echo "merged: $PRIMARY (primary) + $SECONDARY -> $OUT ($(jq length "$tmp") entries)"
+	note="merged: $PRIMARY (primary) + $SECONDARY -> $OUT ($(jq length "$tmp") entries)"
 elif [[ -f "$p" ]]; then
 	cp "$p" "$tmp"
-	echo "no complementary role found -> $OUT ($PRIMARY only)"
+	note="no complementary role found -> $OUT ($PRIMARY only)"
 else
 	echo "error: no compile_commands.json in $PRIMARY" >&2
 	exit 1
 fi
+
+# Leave an unchanged database completely alone. This script runs after every
+# build, but most builds do not alter the compile flags, and needlessly
+# rewriting the file churns its mtime for every watcher of it — and on a
+# synced or snapshotted directory invites duplicate "name 2.json" copies.
+if [[ -f "$OUT" ]] && cmp -s "$tmp" "$OUT"; then
+	exit 0                   # unchanged: say nothing, touch nothing
+fi
+echo "$note"
 
 # Remove first: OUT may be the old symlink into build/, and writing through it
 # would clobber that build's own DB.
