@@ -122,6 +122,15 @@ static volatile uint8_t  core1_last_read_loc = 0u;
 // registers) for device sub-registers added later.
 static volatile bool    read_irq_received = false;
 static volatile uint8_t read_location = 0u;
+// Per-offset tally of guest reads. `Last read` alone only names the most
+// recent offset, which cannot distinguish "the guest is polling steadily"
+// from "the guest read once and stopped" — a distinction that cost a long
+// hunt once, when a stalled console turned out to be the guest never issuing
+// a read rather than anything in the serve path. Counting per offset shows
+// the access pattern directly: a status register polled at a steady rate,
+// a data register read only when the guest consumes, and reserved offsets
+// that should stay at zero.
+static volatile uint32_t read_offset_count[registers::register_length];
 
 // --- Bus write ring ---
 // The write DMA stores the guest byte into write_registers[addr]. The ISR
@@ -148,6 +157,7 @@ __time_critical_func(dma_bus_read_irq_handler())
 	core1_isr_count++;
 	const uintptr_t read_addr = dma_channel_hw_addr(piodma_read.data_channel)->read_addr;
 	read_location = read_addr & registers::register_mask;
+	read_offset_count[read_location]++;
 	read_irq_received = true;
 	// Pop-on-read for the link's Data register happens HERE, not in the
 	// Core 1 loop: every guest read gets its own ISR invocation (6809 bus
@@ -232,6 +242,11 @@ print_status()
 	printf("Last write:  %02X  last read: %02X\n",
 	       core1_last_write_loc, core1_last_read_loc);
 	vid_link_print_status();
+	printf("Guest reads: FF10=%lu FF11=%lu (others %lu)\n",
+	       (unsigned long)read_offset_count[0], (unsigned long)read_offset_count[1],
+	       (unsigned long)(read_offset_count[2] + read_offset_count[3] +
+	           read_offset_count[4] + read_offset_count[5] +
+	           read_offset_count[6] + read_offset_count[7]));
 	registers::dump();
 }
 
