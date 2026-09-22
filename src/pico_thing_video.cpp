@@ -123,27 +123,6 @@ core0_load_print(void)
 	       (unsigned long)frames_missed_burst);
 }
 
-#ifdef MEASURE_FREQS
-static void
-measure_freqs()
-{
-	uint32_t f_pll_sys = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_PLL_SYS_CLKSRC_PRIMARY)/1000;
-	uint32_t f_pll_usb = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_PLL_USB_CLKSRC_PRIMARY)/1000;
-	uint32_t f_rosc = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_ROSC_CLKSRC);
-	uint32_t f_clk_sys = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS)/1000;
-	uint32_t f_clk_peri = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_PERI)/1000;
-	uint32_t f_clk_usb = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_USB)/1000;
-	uint32_t f_clk_adc = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_ADC)/1000;
-	printf("pll_sys  = %d MHz\n", f_pll_sys);
-	printf("pll_usb  = %d MHz\n", f_pll_usb);
-	printf("rosc     = %d kHz\n", f_rosc);
-	printf("clk_sys  = %d MHz\n", f_clk_sys);
-	printf("clk_peri = %d MHz\n", f_clk_peri);
-	printf("clk_usb  = %d MHz\n", f_clk_usb);
-	printf("clk_adc  = %d MHz\n", f_clk_adc);
-// Can't measure clk_ref/xosc as it is the ref
-}
-#endif
 
 int
 main()
@@ -162,9 +141,6 @@ main()
 	printf("Pico2 MC6809E built on %s %s\n", __DATE__, __TIME__);
 	chip_stepping_print();
 
-#ifdef MEASURE_FREQS
-	measure_freqs();
-#endif
 	// Say which voltage was selected, and whether the regulator will
 	// actually deliver it.
 	//

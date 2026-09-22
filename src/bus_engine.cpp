@@ -439,7 +439,6 @@ bus_pio_dma_init()
 	printf("Core0 DMA write_address channel configured\n");
 }
 
-#define MEASURE_FREQS
 // Bring the peripheral up: the host-facing discrete signals, the bus PIO/DMA
 // engine, a cleared register window, and Core 1.
 void
