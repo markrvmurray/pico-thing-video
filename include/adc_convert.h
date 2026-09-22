@@ -32,8 +32,18 @@
  *
  * The divider ratio is per-board too: two main-pico boards measured 1.9407
  * and 2.0001 against a nominal 2. */
-#define ADC_VREF_MV	3300u	/* MEASURE ADC_AVDD and correct */
-#define DIVIDER_X1000	2000u	/* MEASURE the divider and correct */
+/* MEASURED on this board, 2026-09-22, against a metered 5.0000 V rail and
+ * 2.4983 V at the divider midpoint, with clk_adc at its correct 48 MHz.
+ *
+ * ADC_AVDD was not probed directly -- it is derived, which needs no test
+ * point: V(pin) * 4095 / counts. It comes out 13 mV below the 3V3 rail
+ * (metered 3.3165 V), which is what a filter feeding ADC_AVDD would do.
+ *
+ * Calibrated, the rail reads 4.999 V against a metered 5.0000. Uncalibrated it
+ * read 4.992 V, so the correction is worth 0.14% -- small, and worth having
+ * chased mainly because the hunt found a real fault. */
+#define ADC_VREF_MV	3303u	/* derived: 2.4983 V at 3097 counts */
+#define DIVIDER_X1000	2001u	/* measured: 5.0000 / 2.4983 */
 #define ADC_FULL_SCALE	4095u	/* 12-bit conversion */
 
 #ifdef __cplusplus
