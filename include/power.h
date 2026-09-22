@@ -34,6 +34,18 @@ bool power_is_on(void);
 /* Most recent 5V-rail sample, in millivolts (divider already undone). */
 uint32_t power_millivolts(void);
 
+/* Most recent die-temperature sample: raw ADC counts, and tenths of a degree
+ * Celsius. Sampled on the same pass as the rail, from the internal sensor.
+ *
+ * TREAT ABSOLUTE VALUES WITH SUSPICION until the board is calibrated. Both
+ * channels are measured against ADC_AVDD, which the code assumes is nominal;
+ * the die figure amplifies any error in that assumption several-fold. The
+ * main pico also found both channels shift while it serves its bus -- the
+ * rail high, the die reading far too cold -- which has not yet been
+ * characterised on this board. */
+uint16_t power_die_raw(void);
+int32_t  power_die_decicelsius(void);
+
 #ifdef __cplusplus
 }
 #endif

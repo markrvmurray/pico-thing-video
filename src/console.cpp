@@ -70,6 +70,19 @@ print_power()
 	       (unsigned long)(mv / 1000u), (unsigned long)((mv % 1000u) / 10u),
 	       power_is_on() ? "present" : "absent",
 	       bus_engine_serving() ? "bus and video serving" : "standby, console only");
+
+	/* Die temperature, flagged rather than presented bare. Both ADC
+	 * channels are uncalibrated against this board's real reference, and
+	 * the main pico found both shift while it serves its bus -- the rail
+	 * high, the die far too cold. Until that is characterised here, a
+	 * figure taken while serving is an indication, not a measurement, and
+	 * saying so beats printing a number that invites trust. */
+	const int32_t dc = power_die_decicelsius();
+	const int32_t ad = dc < 0 ? -dc : dc;
+	printf("Die temp:    %s%ld.%ld C (%u counts, uncalibrated%s)\n",
+	       dc < 0 ? "-" : "", (long)(ad / 10), (long)(ad % 10),
+	       (unsigned)power_die_raw(),
+	       bus_engine_serving() ? "; reads cold while serving" : "");
 }
 
 static void
