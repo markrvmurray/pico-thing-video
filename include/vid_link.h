@@ -58,8 +58,24 @@ void vid_link_guest_write(uint8_t location, uint8_t value);
  * pops the input FIFO. */
 void vid_link_guest_read(uint8_t location);
 
-/* Per-loop service: drain the command FIFO, restage Data and Stat. */
-void vid_link_task(void);
+/* The link is serviced from BOTH cores, split by deadline class.
+ *
+ * vid_link_stage() runs on the bus core, alongside the scanline interrupt.
+ * It only refreshes the guest-visible registers — short, bounded work.
+ *
+ * vid_link_render() runs on the other core and does everything expensive:
+ * draining the command FIFO and rendering it. Rendering must not share a
+ * core with the video scan-out; that core's deadline is measured in
+ * microseconds and its code has to stay resident, whereas a renderer is
+ * unbounded and lives in flash.
+ *
+ * The split is safe because each ring index has exactly one writer. The bus
+ * core fills the command FIFO and empties the input FIFO; the render core
+ * empties the command FIFO and fills the input FIFO (loopback, and cooked
+ * keystrokes). A reset therefore clears each ring from the side that owns
+ * its index, and hands the renderer's own re-arming to the render core. */
+void vid_link_stage(void);
+void vid_link_render(void);
 
 /* Enqueue one input byte for the guest (sets RDRF via the next restage).
  * The M4 contract with the NitrOS-9 side: keystrokes are PLAIN bytes —

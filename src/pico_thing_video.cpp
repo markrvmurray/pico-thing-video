@@ -583,26 +583,10 @@ __no_inline_not_in_flash_func(main_core1)()
 			}
 		}
 
-		// Service the console link: drain commands, restage Data/Stat.
-		vid_link_task();
-
-		// Draw/blink the cursor here rather than in the scanline IRQ:
-		// that handler must only swap a pointer (see video.cpp).
-		//
-		// ONCE PER FRAME, not once per pass. This loop spins millions of
-		// times a second and is otherwise RAM-resident; the cursor code
-		// lives in flash, so calling it every pass floods the bus with XIP
-		// fetches and starves the scanline DMA until the display drops
-		// sync. A frame's granularity is imperceptible for a cursor and
-		// costs nothing.
-		{
-			static uint32_t serviced_frame;
-			const uint32_t f = video_frames;
-			if (f != serviced_frame) {
-				serviced_frame = f;
-				vidterm_cursor_service();
-			}
-		}
+		// Keep the guest-visible registers current. Rendering the command
+		// stream happens on Core 0: this core carries the bus interrupts
+		// and the scanline deadline, and must stay resident and bounded.
+		vid_link_stage();
 	}
 }
 
@@ -896,6 +880,21 @@ main()
 	for (;;) {
 		poll_console_once();
 		power_task();
+
+		// Render the guest's command stream here, off the bus core.
+		vid_link_render();
+
+		// Cursor, once per frame rather than once per pass: this loop
+		// spins, and the cursor code lives in flash, so calling it every
+		// time would flood the bus with instruction fetches for no gain.
+		{
+			static uint32_t serviced_frame;
+			const uint32_t f = video_frames;
+			if (f != serviced_frame) {
+				serviced_frame = f;
+				vidterm_cursor_service();
+			}
+		}
 
 		// Power lost: quiesce everything except the console. A clean reboot
 		// back into the standby wait above is the shutdown — every power

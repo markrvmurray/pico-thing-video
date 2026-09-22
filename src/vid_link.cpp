@@ -83,12 +83,19 @@ __not_in_flash_func(restage)(void)
 	reg[VID_STAT_OFFSET] = st;
 }
 
+/* Set by a reset on the bus core, acted on by the render core: re-arming the
+ * renderer means touching the framebuffer, which only the render core may do. */
+static volatile bool consume_reset_pending;
+
 extern "C" void
 vid_link_reset(void)
 {
-	tx_tail = tx_head;
+	/* Empty both rings by moving only the index this core owns: it
+	 * produces into tx and consumes from rx, so tx_head and rx_tail are
+	 * both safe to write here while the other core works the far ends. */
+	tx_head = tx_tail;
 	rx_tail = rx_head;
-	vid_link_consume_reset();
+	consume_reset_pending = true;
 	restage();
 }
 
@@ -147,8 +154,22 @@ __not_in_flash_func(vid_link_guest_read)(uint8_t location)
 }
 
 extern "C" void
-__not_in_flash_func(vid_link_task)(void)
+__not_in_flash_func(vid_link_stage)(void)
 {
+	/* Bus core: refresh what the guest sees, nothing more. */
+	restage();
+}
+
+extern "C" void
+vid_link_render(void)
+{
+	/* Render core. Takes as long as it takes; the guest is flow-controlled
+	 * by TDRE and the bus core keeps the registers current meanwhile. */
+	if (consume_reset_pending) {
+		consume_reset_pending = false;
+		vid_link_consume_reset();
+	}
+
 	/* Drain the command FIFO. Loopback (M0 test mode) diverts bytes to
 	 * the input FIFO; otherwise they feed the console layer. */
 	bool consumed = false;
@@ -170,7 +191,6 @@ __not_in_flash_func(vid_link_task)(void)
 	}
 	if (consumed)
 		vid_link_consume_flush();
-	restage();
 }
 
 extern "C" void
