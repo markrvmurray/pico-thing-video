@@ -36,6 +36,12 @@ void hid_cook_keyboard(const uint8_t *report, unsigned len);
  * moves the on-screen pointer. */
 void hid_cook_mouse(const uint8_t *report, unsigned len);
 
+/* Echo cooked input to the console: one line per keystroke and per button
+ * edge. Off until asked for -- invaluable during bring-up, noise while someone
+ * is typing at the guest console. The console's `verbose` command drives this;
+ * the flag is pushed in so this module stays free of console knowledge. */
+void hid_cook_set_echo(bool on);
+
 /* Forget held keys and centre the cursor. */
 void hid_cook_reset(void);
 

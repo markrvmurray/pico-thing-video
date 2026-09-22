@@ -16,10 +16,32 @@
 #include "video.h"	/* screen geometry + vidterm_pointer_set */
 #include "vid_link.h"
 
-/* Echo cooked input to the console (bring-up aid; off in the simulator). */
+/* Echo cooked input to the console. USB_HOST_ECHO decides whether the echo
+ * exists at all (it is compiled out of the simulator); the runtime flag below
+ * decides whether it speaks, and the console's `verbose` command drives it.
+ *
+ * Default OFF. The echo prints a line per keystroke and per button edge, which
+ * is what bring-up wants and pure noise once someone is typing at the guest
+ * console -- so it is asked for rather than assumed. The flag is PUSHED IN
+ * through hid_cook_set_echo(): this file stays portable, and must not learn
+ * that a console exists. */
 #ifndef USB_HOST_ECHO
 #define USB_HOST_ECHO 1
 #endif
+
+#if USB_HOST_ECHO
+static bool echo_enabled;
+#endif
+
+void
+hid_cook_set_echo(bool on)
+{
+#if USB_HOST_ECHO
+	echo_enabled = on;
+#else
+	(void)on;
+#endif
+}
 
 /* ---- USB HID usage IDs (boot keyboard) ---------------------------------- */
 enum : uint8_t {
@@ -53,6 +75,8 @@ emit_key(uint8_t c)
 	 * bring-up aid. */
 	vid_link_input(c);
 #if USB_HOST_ECHO
+	if (!echo_enabled)
+		return;
 	if (c >= ' ' && c < 0x7F)
 		printf("KEY '%c' (0x%02X)\n", (char)c, c);
 	else
@@ -196,6 +220,8 @@ report_button(const char *name, bool now, bool *was)
 		return;
 	*was = now;
 #if USB_HOST_ECHO
+	if (!echo_enabled)
+		return;
 	printf("MOUSE %s %s at %d,%d (col %d row %d)\n",
 	       name, now ? "down" : "up",
 	       cursor_x, cursor_y, cur_col(), cur_row());
@@ -224,7 +250,7 @@ hid_cook_mouse(const uint8_t *report, unsigned len)
 	report_button("right",  (buttons & MOUSE_BTN_R) != 0, &was_right);
 	report_button("middle", (buttons & MOUSE_BTN_M) != 0, &was_middle);
 #if USB_HOST_ECHO
-	if (wheel)
+	if (echo_enabled && wheel)
 		printf("MOUSE wheel %+d\n", wheel);
 #endif
 

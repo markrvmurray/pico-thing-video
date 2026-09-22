@@ -23,6 +23,7 @@
 #include "chip_stepping.h"
 #include "command_parser.h"
 #include "console.h"
+#include "hid_cook.h"
 #include "i2c_service.h"
 #include "pico_thing_video.h"
 #include "power.h"
@@ -74,7 +75,12 @@ print_power()
 static void
 print_status()
 {
-	printf("Verbose:     %s\n", verbose ? "on" : "off");
+#if USB_HOST_MODE
+	printf("Verbose:     %s (HID input echo)\n", verbose ? "on" : "off");
+#else
+	printf("Verbose:     %s (nothing to echo in a device build)\n",
+	       verbose ? "on" : "off");
+#endif
 	chip_stepping_print();
 	print_power();
 	printf("!RESET:      %s\n", RESET_IS_ASSERTED ? "asserted" : "released");
@@ -120,7 +126,17 @@ process_command(char *buf)
 
 	case CMD_VERBOSE:
 		verbose = !verbose;
-		printf("Verbose mode %s\n", verbose ? "on" : "off");
+#if USB_HOST_MODE
+		/* Say what it actually does. A toggle that reports only its own
+		 * state leaves the operator unable to tell "quiet" from
+		 * "broken" -- which is what this command did for months while
+		 * driving nothing at all. */
+		hid_cook_set_echo(verbose);
+		printf("HID input echo %s\n", verbose ? "on" : "off");
+#else
+		printf("Verbose %s — but this is a device build, so there is no"
+		       " HID input to echo\n", verbose ? "on" : "off");
+#endif
 		break;
 
 	case CMD_STATUS: {
@@ -161,7 +177,7 @@ status_done:
 #if !USB_HOST_MODE
 		"  usb <args>         (ub)  send words to the USB CDC guest console\n"
 #endif
-		"  verbose            (vb)  toggle verbose output\n"
+		"  verbose            (vb)  echo HID keys and clicks to this console\n"
 		"  help               (h)   this text\n"
 		"\nThe peripheral follows the main 5V rail: bus and video serve only\n"
 		"while it is up; on power loss the firmware restarts into standby\n"
