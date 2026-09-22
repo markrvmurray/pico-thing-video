@@ -242,6 +242,9 @@ esc_exec(void)
 		}
 		break;
 	}
+	case 0x4Eu:			/* PutGC: guest places the graphics cursor */
+		vidterm_pointer_set(p16(0), p16(2));
+		break;
 	case 0x2Bu:			/* GPLoad: swallow the streamed payload */
 		esc_skip = (uint16_t)p16(7);
 		if (esc_skip > 0u)

@@ -30,6 +30,7 @@ extern "C" {
 
 #define VID_DATA_OFFSET   0u	/* $FF10 */
 #define VID_STAT_OFFSET   1u	/* $FF11 */
+#define VID_MOUSE_OFFSET  2u	/* $FF12 */
 
 /* VID.Stat (read) */
 #define VID_STAT_RDRF     0x01u	/* input byte available in Data */
@@ -37,6 +38,8 @@ extern "C" {
 #define VID_STAT_READY    0x04u	/* firmware alive and initialised */
 #define VID_STAT_VER_LSB  3u	/* bits 5-3: protocol version */
 #define VID_STAT_VERSION  1u
+#define VID_STAT_MOUSE    0x40u	/* pointer or buttons moved since the last
+				 * complete snapshot read */
 
 /* VID.Ctl (write): bit1 is a level, bit0 an action — $03 = reset with
  * loopback left on. */
@@ -76,6 +79,49 @@ void vid_link_guest_read(uint8_t location);
  * its index, and hands the renderer's own re-arming to the render core. */
 void vid_link_stage(void);
 void vid_link_render(void);
+
+/* ── Mouse ($FF12 VID.Mouse, read) ───────────────────────────────────────
+ * Successive reads walk a seven-byte snapshot; the index wraps and RE-LATCHES
+ * at the start of each pass, so reading seven bytes in a row yields one
+ * self-consistent sample without any handshake.
+ *
+ *   0    buttons now: bit0 left, bit1 right, bit2 middle
+ *   1    pressed since the last snapshot, same bits -- cleared on latch
+ *   2-3  X, big-endian, 0 .. FB_WIDTH-1
+ *   4-5  Y, big-endian, 0 .. FB_HEIGHT-1
+ *   6    wheel notches since the last snapshot, signed -- cleared on latch
+ *
+ * Byte 1 is what makes a slow poll safe: the guest's tick runs at 50Hz, so a
+ * click shorter than 20ms would vanish between samples of byte 0 alone. The
+ * sticky bits mean its edge detection cannot miss a press.
+ *
+ * VID.Stat bit 6 says whether anything has changed, so an idle mouse costs the
+ * guest one bit test rather than seven reads.
+ *
+ * Deliberately NOT the CoCo3 32-byte SS.Mouse packet: that driver does its own
+ * click counting and timing, and half the packet is window geometry only the
+ * guest knows. We supply the device, it keeps the shadow. */
+#define VID_MOUSE_SNAPSHOT_LEN 7u
+
+#define VID_MOUSE_BTN_LEFT    0x01u
+#define VID_MOUSE_BTN_RIGHT   0x02u
+#define VID_MOUSE_BTN_MIDDLE  0x04u
+
+/* Called by the HID cooker (render core) after each mouse report: absolute
+ * position already clamped to the screen, current buttons, and the wheel
+ * movement for this report. */
+void vid_link_mouse_update(int x, int y, uint8_t buttons, int wheel_delta);
+
+/* Note a guest read of the mouse port: advance the snapshot index, relatching
+ * at wrap. Called from the bus-read ISR, like the Data pop. */
+void vid_link_mouse_read(void);
+/* Guest write to VID.Mouse: sample now and home the snapshot index. Makes a
+ * pass self-framing (write, then read VID_MOUSE_SNAPSHOT_LEN bytes), so a
+ * guest that loses count resyncs with one write instead of a link reset. */
+void vid_link_mouse_write(void);
+
+/* Console diagnostics: current pointer state. */
+void vid_link_mouse_print(void);
 
 /* Enqueue one input byte for the guest (sets RDRF via the next restage).
  * The M4 contract with the NitrOS-9 side: keystrokes are PLAIN bytes —

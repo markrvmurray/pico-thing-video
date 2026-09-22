@@ -165,6 +165,8 @@ __time_critical_func(dma_bus_read_irq_handler())
 	// reads are far slower than this tier's latency), so the pop can
 	// neither be lost to mailbox overwrite nor double-counted.
 	vid_link_guest_read(read_location);
+	if (read_location == VID_MOUSE_OFFSET)
+		vid_link_mouse_read();
 }
 
 // ISR for the R/!W bus write loop and DMA chain.
@@ -182,9 +184,16 @@ __time_critical_func(dma_bus_write_irq_handler())
 	// Mirror into the read side (scratch-register behaviour for the
 	// reserved registers). The link offsets are NOT mirrored: their read
 	// side is device-owned (VID.Data stages the input head byte, VID.Stat
-	// the status), and a TxD write must not clobber it.
-	if (wloc > VID_STAT_OFFSET)
+	// the status, VID.Mouse the pointer snapshot), and a guest write must
+	// not clobber it.
+	if (wloc > VID_MOUSE_OFFSET)
 		reg[wloc] = wval;
+	// Mouse re-latch/resync happens HERE rather than on the Core 1 drain:
+	// a guest may read $FF12 in the very next instruction, which would
+	// race the drain, and this write exists precisely to leave the guest
+	// in a known state.
+	if (wloc == VID_MOUSE_OFFSET)
+		vid_link_mouse_write();
 	// Queue for Core 1.
 	const uint8_t h = write_ring_head;
 	const uint8_t next_h = (h + 1u) & WRITE_RING_MASK;
@@ -243,6 +252,7 @@ print_status()
 	printf("Last write:  %02X  last read: %02X\n",
 	       core1_last_write_loc, core1_last_read_loc);
 	vid_link_print_status();
+	vid_link_mouse_print();
 	printf("Guest reads: FF10=%lu FF11=%lu (others %lu)\n",
 	       (unsigned long)read_offset_count[0], (unsigned long)read_offset_count[1],
 	       (unsigned long)(read_offset_count[2] + read_offset_count[3] +

@@ -297,8 +297,92 @@ static int     cursor_drawn_col;
 static int     cursor_drawn_row;
 static uint32_t cursor_shown_at;              /* video_frames when last shown */
 
+/* ── Mouse pointer ────────────────────────────────────────────────────────
+ * Same save-under discipline as the text cursor, with a shape and a mask
+ * instead of a cell inversion. Both overlays are lifted and restored together
+ * (see vidterm_cursor_hide / vidterm_cursor_service), so their ordering is
+ * decided here rather than by whichever call site happens to run first. */
+#define PTR_W 8
+#define PTR_H 12
+
+/* A plain arrow. 1 = draw, 0 = show what is underneath. The outline is drawn
+ * in the background colour so the pointer stays visible over any content. */
+static const uint8_t ptr_shape[PTR_H] = {
+    0x80, 0xC0, 0xE0, 0xF0, 0xF8, 0xFC,
+    0xFE, 0xFF, 0xF8, 0xD8, 0x8C, 0x0C
+};
+static const uint8_t ptr_edge[PTR_H] = {   /* 1 = outline pixel */
+    0x80, 0x40, 0x20, 0x10, 0x08, 0x04,
+    0x02, 0x01, 0x08, 0x48, 0x84, 0x0C
+};
+
+static int     pointer_x, pointer_y;
+static bool    pointer_enabled;
+static uint8_t pointer_save[PTR_H][PTR_W];
+static bool    pointer_drawn;
+static int     pointer_drawn_x, pointer_drawn_y;
+
+void vidterm_pointer_set(int x, int y)
+{
+    if (x < 0) x = 0;
+    if (x > FB_WIDTH  - 1) x = FB_WIDTH  - 1;
+    if (y < 0) y = 0;
+    if (y > FB_HEIGHT - 1) y = FB_HEIGHT - 1;
+    pointer_x = x;
+    pointer_y = y;
+    pointer_enabled = true;      /* first movement brings it on screen */
+}
+
+void vidterm_pointer_enable(bool on)
+{
+    pointer_enabled = on;
+}
+
+static void pointer_hide(void)
+{
+    if (!pointer_drawn)
+        return;
+    for (int gy = 0; gy < PTR_H; gy++) {
+        const int y = pointer_drawn_y + gy;
+        if (y >= FB_HEIGHT)
+            break;
+        int w = PTR_W;
+        if (pointer_drawn_x + w > FB_WIDTH)
+            w = FB_WIDTH - pointer_drawn_x;
+        memcpy(&video_framebuffer[y][pointer_drawn_x], pointer_save[gy], (size_t)w);
+    }
+    pointer_drawn = false;
+}
+
+static void pointer_show(void)
+{
+    if (pointer_drawn || !pointer_enabled)
+        return;
+    for (int gy = 0; gy < PTR_H; gy++) {
+        const int y = pointer_y + gy;
+        if (y >= FB_HEIGHT)
+            break;
+        int w = PTR_W;
+        if (pointer_x + w > FB_WIDTH)
+            w = FB_WIDTH - pointer_x;
+        uint8_t *line = &video_framebuffer[y][pointer_x];
+        memcpy(pointer_save[gy], line, (size_t)w);
+        for (int gx = 0; gx < w; gx++) {
+            const uint8_t bit = (uint8_t)(0x80u >> gx);
+            if (ptr_shape[gy] & bit)
+                line[gx] = (ptr_edge[gy] & bit) ? 0x00u : 0xFFu;
+        }
+    }
+    pointer_drawn = true;
+    pointer_drawn_x = pointer_x;
+    pointer_drawn_y = pointer_y;
+}
+
 void vidterm_cursor_hide(void)
 {
+    /* Both overlays: the pointer sits on top, so it comes off first. */
+    pointer_hide();
+
     if (!cursor_drawn)
         return;
     const int x = cursor_drawn_col * CHAR_W;
@@ -308,7 +392,7 @@ void vidterm_cursor_hide(void)
     cursor_drawn = false;
 }
 
-void vidterm_cursor_service(void)
+static void cursor_service(void)
 {
     /* Blink phase. A move restarts the cycle (cursor_shown_at), so the cursor
      * is always visible the instant it arrives somewhere — blinking off on
@@ -340,6 +424,24 @@ void vidterm_cursor_service(void)
     cursor_drawn_row = video_cursor_row;
 }
 
+static void pointer_service(void)
+{
+    if (pointer_drawn &&
+        (!pointer_enabled || pointer_drawn_x != pointer_x ||
+         pointer_drawn_y != pointer_y))
+        pointer_hide();
+    pointer_show();
+}
+
+/* The one public entry. Order matters: the cursor is laid down first and the
+ * pointer over it, so a pointer resting on the cursor cell hides it rather
+ * than the reverse, and each save-under holds what was genuinely beneath. */
+void vidterm_cursor_service(void)
+{
+    cursor_service();
+    pointer_service();
+}
+
 void vidterm_cursor_set(int col, int row)
 {
     if (col < 0) col = 0;
@@ -367,6 +469,10 @@ void video_render_init(void)
     video_cursor_row = 0;
     video_cursor_enabled = false;   /* nothing owns the screen yet */
     cursor_drawn = false;
+    pointer_enabled = false;        /* appears on first movement */
+    pointer_drawn = false;
+    pointer_x = FB_WIDTH / 2;
+    pointer_y = FB_HEIGHT / 2;
 
     memset(video_framebuffer, 0, sizeof(video_framebuffer));
     memset(text_cells, 0, sizeof(text_cells));

@@ -29,6 +29,175 @@ static volatile uint16_t rx_head, rx_tail;
 static bool     ready;
 static bool     loopback;
 
+/* ── Mouse ───────────────────────────────────────────────────────────────
+ * Live state belongs to the render core (the HID cooker updates it); the
+ * snapshot, its index and the guest-visible register belong to the bus core,
+ * keeping to the one-writer-per-field rule the link relies on elsewhere.
+ *
+ * The bus core never writes the live state. "Cleared on latch" is therefore
+ * implemented the other way round: the bus core bumps a generation counter
+ * when it latches, and the render core clears its own accumulators when it
+ * notices the generation move. Nothing crosses.
+ *
+ * The position pair is published under a seqlock so the bus core cannot latch
+ * a half-updated coordinate; everything else is a single byte and atomic in
+ * its own right. */
+static volatile uint32_t ms_seq;		/* odd while the pair is in flux */
+static volatile int      ms_x, ms_y;		/* render core owns */
+static volatile uint8_t  ms_buttons;
+static volatile uint8_t  ms_sticky;		/* presses since the last latch */
+static volatile int8_t   ms_wheel;		/* notches since the last latch */
+static volatile uint32_t ms_latch_gen;		/* bus core bumps on latch */
+static volatile bool     ms_changed;		/* drives VID.Stat bit 6 */
+
+/* TWO INVARIANTS THE GUEST DRIVER RELIES ON. Its poll skips the seven reads
+ * entirely when VID.Stat bit 6 is clear, which is only safe because:
+ *
+ *   1. bit 6 is clear ONLY when the mouse is genuinely idle. ms_changed is
+ *      set by EVERY call to vid_link_mouse_update(), and the HID cooker calls
+ *      it on every report -- a press included. Making that conditional (on
+ *      movement, say) would let a press hide behind a clear bit 6, and the
+ *      driver would never come to collect it.
+ *
+ *   2. An edge survives any number of skipped polls. The press and wheel
+ *      accumulators clear when a PASS STARTS, never when a latch happens, so
+ *      a click falling entirely inside a tick the driver skipped is still
+ *      waiting for the next pass that runs.
+ *
+ * Both are load-bearing for SS.MsSig on the 6809 side. Breaking either one
+ * loses clicks silently and intermittently -- the worst way to find out. */
+
+static uint8_t  ms_snapshot[VID_MOUSE_SNAPSHOT_LEN];   /* bus core only */
+static uint8_t  ms_index;
+
+/* Bus core: fold the live state into the snapshot.
+ *
+ * Position is copied; the edge information ACCUMULATES. Latching may happen
+ * several times before the guest looks, so presses and wheel notches are OR'd
+ * and summed into accumulators rather than replacing what is already there —
+ * otherwise a second latch before the read would erase the press the first one
+ * captured, which is the very thing byte 1 exists to prevent. The accumulators
+ * are cleared when the guest STARTS a pass, not when we latch. */
+static uint8_t ms_sticky_acc;
+static int     ms_wheel_acc;
+static volatile bool ms_dirty;		/* snapshot is behind the live state */
+static volatile bool ms_held;		/* guest latched explicitly; hold it */
+
+static void
+__not_in_flash_func(ms_latch)(void)
+{
+	uint32_t s0;
+	int x, y;
+
+	do {
+		s0 = ms_seq;
+		x = ms_x;
+		y = ms_y;
+	} while ((s0 & 1u) != 0u || s0 != ms_seq);
+
+	ms_sticky_acc = (uint8_t)(ms_sticky_acc | ms_sticky);
+	ms_wheel_acc += ms_wheel;
+	if (ms_wheel_acc > 127) ms_wheel_acc = 127;
+	if (ms_wheel_acc < -128) ms_wheel_acc = -128;
+
+	/* Tell the render core those contributions have been taken; it clears
+	 * its own copies, so nothing is written across the core boundary. */
+	ms_latch_gen = ms_latch_gen + 1u;
+
+	ms_snapshot[0] = ms_buttons;
+	ms_snapshot[1] = ms_sticky_acc;
+	ms_snapshot[2] = (uint8_t)(x >> 8);	/* big-endian, as the 6809 reads */
+	ms_snapshot[3] = (uint8_t)x;
+	ms_snapshot[4] = (uint8_t)(y >> 8);
+	ms_snapshot[5] = (uint8_t)y;
+	ms_snapshot[6] = (uint8_t)ms_wheel_acc;
+	ms_dirty = false;
+}
+
+extern "C" void
+vid_link_mouse_update(int x, int y, uint8_t buttons, int wheel_delta)
+{
+	/* Render core. Drop whatever the bus core has already taken before
+	 * folding in anything new, so a press can never be discarded between
+	 * being recorded and being reported. */
+	static uint32_t seen_gen;
+	static uint8_t  prev_buttons;
+
+	const uint32_t gen = ms_latch_gen;
+	if (gen != seen_gen) {
+		seen_gen = gen;
+		ms_sticky = 0u;
+		ms_wheel = 0;
+	}
+
+	ms_seq = ms_seq + 1u;		/* odd: pair in flux */
+	ms_x = x;
+	ms_y = y;
+	ms_seq = ms_seq + 1u;		/* even: pair consistent */
+
+	ms_sticky = (uint8_t)(ms_sticky | (uint8_t)(buttons & ~prev_buttons));
+	prev_buttons = buttons;
+	ms_buttons = buttons;
+
+	int w = (int)ms_wheel + wheel_delta;
+	if (w > 127) w = 127;
+	if (w < -128) w = -128;
+	ms_wheel = (int8_t)w;
+
+	ms_changed = true;
+	ms_dirty = true;
+}
+
+extern "C" void
+__not_in_flash_func(vid_link_mouse_read)(void)
+{
+	/* Bus core, from the read ISR: the byte has already gone out, so step
+	 * on and stage the next. */
+	if (++ms_index >= VID_MOUSE_SNAPSHOT_LEN) {
+		ms_index = 0u;
+		ms_held = false;
+	} else if (ms_index == 1u) {
+		/* Byte 0 has just been served, so the guest is committed to this
+		 * pass: the sample is taken, and the edges it carries are now
+		 * its responsibility. */
+		ms_changed = false;
+		ms_sticky_acc = 0u;
+		ms_wheel_acc = 0;
+		ms_held = false;
+	}
+	reg[VID_MOUSE_OFFSET] = ms_snapshot[ms_index];
+}
+
+extern "C" void
+__not_in_flash_func(vid_link_mouse_write)(void)
+{
+	/* Bus core, from the write ISR -- SYNCHRONOUSLY, not via the write
+	 * ring. A guest doing "sta $FF12 / lda $FF12" back to back would race
+	 * Core 1's drain, and the one job of this write is to put the guest in
+	 * a known state; it cannot be the thing that is uncertain.
+	 *
+	 * Any value: take a sample now and home the index. This is what makes
+	 * a pass self-framing -- write, then read seven bytes -- so losing
+	 * count is not a state the guest can reach, and recovering from one
+	 * costs a write rather than the destructive link reset. */
+	ms_index = 0u;
+	ms_latch();
+	ms_held = true;		/* the sample is the guest's, until it reads */
+	reg[VID_MOUSE_OFFSET] = ms_snapshot[0];
+}
+
+extern "C" void
+vid_link_mouse_print(void)
+{
+	printf("Mouse:       %d,%d buttons %c%c%c; snapshot byte %u%s\n",
+	       ms_x, ms_y,
+	       (ms_buttons & VID_MOUSE_BTN_LEFT)   ? 'L' : '-',
+	       (ms_buttons & VID_MOUSE_BTN_MIDDLE) ? 'M' : '-',
+	       (ms_buttons & VID_MOUSE_BTN_RIGHT)  ? 'R' : '-',
+	       (unsigned)ms_index,
+	       ms_changed ? ", changed" : "");
+}
+
 /* Diagnostics for the console 'status' command. */
 static volatile uint32_t stat_tx_accepted;	/* bytes taken off the bus */
 static volatile uint32_t stat_tx_consumed;	/* bytes eaten by the consumer */
@@ -80,6 +249,17 @@ __not_in_flash_func(restage)(void)
 		st |= VID_STAT_TDRE;
 	if (ready)
 		st |= VID_STAT_READY;
+	if (ms_changed) {
+		st |= VID_STAT_MOUSE;
+		/* Parked between passes: keep byte 0 current, so a pass starts
+		 * with a sample taken microseconds ago rather than one left over
+		 * from the previous pass. Once a pass is under way the snapshot
+		 * is frozen, which is what makes it self-consistent. */
+		if (ms_index == 0u && ms_dirty && !ms_held) {
+			ms_latch();
+			reg[VID_MOUSE_OFFSET] = ms_snapshot[0];
+		}
+	}
 	reg[VID_STAT_OFFSET] = st;
 }
 
@@ -96,6 +276,15 @@ vid_link_reset(void)
 	tx_head = tx_tail;
 	rx_tail = rx_head;
 	consume_reset_pending = true;
+
+	/* Put the snapshot back at byte 0. A guest that abandons a pass part
+	 * way through has no other way to regain phase, and reset is exactly
+	 * the lever it reaches for; without this the index stays stranded and
+	 * every later pass is permanently misaligned. */
+	ms_index = 0u;
+	ms_latch();
+	reg[VID_MOUSE_OFFSET] = ms_snapshot[0];
+
 	restage();
 }
 
@@ -104,7 +293,7 @@ vid_link_init(void)
 {
 	loopback = false;
 	ready = true;
-	vid_link_reset();
+	vid_link_reset();		/* also homes the mouse snapshot */
 }
 
 extern "C" void
@@ -127,6 +316,10 @@ __not_in_flash_func(vid_link_guest_write)(uint8_t location, uint8_t value)
 			tx_head = tx_head + 1u;
 			stat_tx_accepted = stat_tx_accepted + 1u;
 		}
+		break;
+	case VID_MOUSE_OFFSET:
+		/* Already handled synchronously in the write ISR (see
+		 * vid_link_mouse_write); nothing to do on the drain. */
 		break;
 	case VID_STAT_OFFSET:
 		loopback = (value & VID_CTL_LOOPBACK) != 0u;

@@ -326,6 +326,18 @@ process_mouse(const hid_mouse_report_t *r)
 	int w = r->wheel;
 	while (w > 0) { emit_simple(EVT_SCROLL_UP);   w--; }
 	while (w < 0) { emit_simple(EVT_SCROLL_DOWN); w++; }
+
+	/* Publish the raw state for the guest. The cooked gestures above stay
+	 * as local diagnostics; the guest gets position and buttons and does
+	 * its own click counting, which is what its driver already expects. */
+	uint8_t b = 0u;
+	if (r->buttons & MOUSE_BUTTON_LEFT)   b |= VID_MOUSE_BTN_LEFT;
+	if (r->buttons & MOUSE_BUTTON_RIGHT)  b |= VID_MOUSE_BTN_RIGHT;
+	if (r->buttons & MOUSE_BUTTON_MIDDLE) b |= VID_MOUSE_BTN_MIDDLE;
+	vid_link_mouse_update(cursor_x, cursor_y, b, r->wheel);
+
+	/* Follow the pointer on screen. */
+	vidterm_pointer_set(cursor_x, cursor_y);
 }
 
 /* ======================================================================== *

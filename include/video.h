@@ -63,6 +63,13 @@ void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr); /* text grid up one 
  * graphics and it needs no save-under. */
 void vidterm_cursor_set(int col, int row);
 void vidterm_cursor_enable(bool on);
+/* Mouse pointer. An arrow sprite with a transparency mask, drawn by the same
+ * save-under machinery as the cursor. Position is in PIXELS; the firmware
+ * tracks it from USB so it stays smooth whatever the guest is doing, and the
+ * guest can place it too (the PutGC graphics command). */
+void vidterm_pointer_set(int x, int y);
+void vidterm_pointer_enable(bool on);
+
 /* Lift the cursor out of the framebuffer before anything else draws. */
 void vidterm_cursor_hide(void);
 /* Draw, move or blink it as required; call from the service loop, never from
