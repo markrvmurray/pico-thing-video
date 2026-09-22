@@ -384,9 +384,31 @@ tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance,
 	if (proto == HID_ITF_PROTOCOL_KEYBOARD &&
 	    len >= (uint16_t)sizeof(hid_keyboard_report_t)) {
 		process_kbd((const hid_keyboard_report_t *)report);
-	} else if (proto == HID_ITF_PROTOCOL_MOUSE &&
-		   len >= (uint16_t)sizeof(hid_mouse_report_t)) {
-		process_mouse((const hid_mouse_report_t *)report);
+	} else if (proto == HID_ITF_PROTOCOL_MOUSE && len >= 3u) {
+		/* A boot mouse reports THREE bytes -- buttons, x, y. Wheel and
+		 * pan are later additions that many mice simply do not send, so
+		 * demanding sizeof(hid_mouse_report_t) (five) drops every
+		 * report from an ordinary mouse, silently, while still burning
+		 * the CPU that received it. Copy the bytes that are present
+		 * rather than casting a short buffer to the full struct. */
+		hid_mouse_report_t m;
+		m.buttons = report[0];
+		m.x       = (int8_t)report[1];
+		m.y       = (int8_t)report[2];
+		m.wheel   = (len >= 4u) ? (int8_t)report[3] : (int8_t)0;
+		m.pan     = (len >= 5u) ? (int8_t)report[4] : (int8_t)0;
+		process_mouse(&m);
+	} else {
+		/* Say so once per instance. A report that arrives and matches
+		 * nothing is invisible otherwise -- it looks exactly like a
+		 * device that is not sending at all. */
+		static uint8_t moaned[CFG_TUH_HID];
+		if (instance < CFG_TUH_HID && moaned[instance] < 3u) {
+			moaned[instance]++;
+			printf("USB host: unhandled HID report (dev %u, itf %u,"
+			       " protocol %u, %u bytes)\n",
+			       dev_addr, instance, proto, (unsigned)len);
+		}
 	}
 
 	/* Re-arm for the next report. */
