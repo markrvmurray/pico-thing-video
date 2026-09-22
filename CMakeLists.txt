@@ -118,7 +118,7 @@ add_executable(pico-thing-video
 # build needs the HID/hub callbacks + input cooking instead (and never uses the
 # device descriptors).
 if(USB_HOST_MODE)
-	target_sources(pico-thing-video PRIVATE src/usb_host.cpp)
+	target_sources(pico-thing-video PRIVATE src/usb_host.cpp src/hid_cook.cpp)
 else()
 	target_sources(pico-thing-video PRIVATE src/usb_descriptors.cpp)
 endif()
