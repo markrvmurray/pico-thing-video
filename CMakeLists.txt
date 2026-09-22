@@ -32,6 +32,16 @@ include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 # pins it OFF).
 option(USB_HOST_MODE "Build USB as HID host (keyboard+mouse) instead of CDC device" ON)
 
+# Run clk_sys at 320 MHz for Core 0 rendering headroom, with clk_hstx decoupled
+# onto PLL_USB so the DVI pixel clock stays at 38.4 MHz, and the core voltage
+# raised to 1.30 V. A BUILD OPTION rather than a source #define so a 320 MHz
+# image is a configuration rather than an edit: the two can coexist in separate
+# trees, and an .elf cannot silently become the other one on a later rebuild.
+# Default OFF -- bench-unvalidated on this board (320 MHz at 1.30 V is proven
+# on the main pico, but it drives no display, so the decoupled HSTX clock and
+# the thermals of continuous scan-out are untested).
+option(FAST_SYS_CLK_320 "Run clk_sys at 320 MHz with clk_hstx on PLL_USB" OFF)
+
 # Flex and bison run on the BUILD HOST; the generated .c files are
 # cross-compiled for RP2350 by arm-none-eabi-gcc.
 #
@@ -123,6 +133,10 @@ if(USB_HOST_MODE)
 	target_sources(pico-thing-video PRIVATE src/usb_host.cpp src/hid_cook.cpp)
 else()
 	target_sources(pico-thing-video PRIVATE src/usb_descriptors.cpp)
+endif()
+
+if(FAST_SYS_CLK_320)
+	target_compile_definitions(pico-thing-video PRIVATE FAST_SYS_CLK_320=1)
 endif()
 
 # Include both the project headers and generated ones
