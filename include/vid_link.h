@@ -38,6 +38,9 @@ extern "C" {
 #define VID_STAT_READY    0x04u	/* firmware alive and initialised */
 #define VID_STAT_VER_LSB  3u	/* bits 5-3: protocol version */
 #define VID_STAT_VERSION  1u
+#define VID_STAT_IRQ      0x80u	/* this device is asserting !IRQ (MC6850
+				 * puts its IRQ flag in bit 7 too, and drives
+				 * the pin from it; so do we) */
 #define VID_STAT_MOUSE    0x40u	/* pointer or buttons moved since the last
 				 * complete snapshot read */
 
@@ -45,6 +48,11 @@ extern "C" {
  * loopback left on. */
 #define VID_CTL_RESET     0x01u	/* flush both FIFOs (M1+: clear/home too) */
 #define VID_CTL_LOOPBACK  0x02u	/* echo command bytes into the input FIFO */
+#define VID_CTL_RIE       0x80u	/* receive interrupt enable: assert !IRQ while
+				 * RDRF is set. Bit 7 is where the MC6850 keeps
+				 * RIE. OFF after reset, so a polling guest is
+				 * never interrupted by a line it did not ask
+				 * for. */
 
 /* All of the below run on Core 1 (the bus dispatch loop) unless noted. */
 
@@ -110,6 +118,16 @@ void vid_link_render(void);
 /* Called by the HID cooker (render core) after each mouse report: absolute
  * position already clamped to the screen, current buttons, and the wheel
  * movement for this report. */
+/* Drive the host !IRQ line. PLATFORM-PROVIDED, because this translation unit
+ * is portable and must not know about GPIOs: the firmware drives GP21 as a
+ * simulated open collector, and the simulator drives the emulated 6809's IRQ
+ * pin. Called only when the state CHANGES -- it is reached from the bus core's
+ * hot loop, which must not poke hardware on every pass. */
+void vid_link_irq_out(bool assert);
+
+/* True while this device is asserting !IRQ. */
+bool vid_link_irq_asserted(void);
+
 void vid_link_mouse_update(int x, int y, uint8_t buttons, int wheel_delta);
 
 /* Note a guest read of the mouse port: advance the snapshot index, relatching

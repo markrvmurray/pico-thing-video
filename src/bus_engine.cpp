@@ -466,6 +466,20 @@ bus_engine_start(void)
 }
 
 
+/* Drive the host !IRQ line on behalf of the portable link code (see
+ * vid_link.h). Simulated open collector: becoming an output drives the
+ * pre-loaded 0 onto the line, becoming an input releases it to the host's
+ * pull-up. Reached from Core 1's staging pass, hence RAM-resident -- and only
+ * ever on a change of state, so this is not in the per-pass cost. */
+extern "C" void
+__not_in_flash_func(vid_link_irq_out)(bool assert)
+{
+	if (assert)
+		ASSERT_IRQ;
+	else
+		DEASSERT_IRQ;
+}
+
 /* ---- Status, for the console -------------------------------------------- */
 
 bool

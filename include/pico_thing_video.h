@@ -50,7 +50,7 @@ enum {
 	GPIO_RESET    = 20,	// [Y] [i]  !RESET
 
 	// Interrupt back to the host CPU
-	GPIO_IRQ      = 21,	// [ ] [o*] !IRQ (simulated open-collector; the one bus signal not yet proven)
+	GPIO_IRQ      = 21,	// [ ] [o*] !IRQ (simulated open-collector; driven by VID.Stat bit7 — the one bus signal not yet proven)
 
 	// The timing-critical bus pins (E, Q, R/!W, A2-0, D7-0, !CS) and the two PIO
 	// trace pins are owned by the PIO programs and defined in

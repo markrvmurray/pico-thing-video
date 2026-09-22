@@ -28,6 +28,8 @@ static volatile uint16_t rx_head, rx_tail;
 
 static bool     ready;
 static bool     loopback;
+static bool     rie;		/* receive interrupt enable (Ctl bit 7) */
+static bool     irq_asserted;	/* what we last told the platform */
 
 /* ── Mouse ───────────────────────────────────────────────────────────────
  * Live state belongs to the render core (the HID cooker updates it); the
@@ -186,6 +188,12 @@ __not_in_flash_func(vid_link_mouse_write)(void)
 	reg[VID_MOUSE_OFFSET] = ms_snapshot[0];
 }
 
+extern "C" bool
+vid_link_irq_asserted(void)
+{
+	return irq_asserted;
+}
+
 extern "C" void
 vid_link_mouse_print(void)
 {
@@ -241,9 +249,23 @@ __not_in_flash_func(restage)(void)
 {
 	uint8_t st = VID_STAT_VERSION << VID_STAT_VER_LSB;
 
-	if (rx_level() > 0u) {
+	const bool rdrf = rx_level() > 0u;
+	if (rdrf) {
 		st |= VID_STAT_RDRF;
 		reg[VID_DATA_OFFSET] = rx_fifo[rx_tail & RX_FIFO_MASK];
+	}
+
+	/* !IRQ follows RDRF while the guest has asked for it, exactly as an
+	 * MC6850 does: asserted when a byte is waiting, released once the
+	 * guest has read the last one. Bit 7 mirrors the pin, so a guest
+	 * sharing the interrupt can tell whether this device is the source
+	 * without a side effect. */
+	const bool want_irq = rie && rdrf;
+	if (want_irq)
+		st |= VID_STAT_IRQ;
+	if (want_irq != irq_asserted) {
+		irq_asserted = want_irq;
+		vid_link_irq_out(want_irq);	/* on CHANGE only */
 	}
 	if (tx_level() < TX_FIFO_SIZE)
 		st |= VID_STAT_TDRE;
@@ -292,6 +314,7 @@ extern "C" void
 vid_link_init(void)
 {
 	loopback = false;
+	rie = false;		/* never interrupt a guest that has not asked */
 	ready = true;
 	vid_link_reset();		/* also homes the mouse snapshot */
 }
@@ -323,6 +346,7 @@ __not_in_flash_func(vid_link_guest_write)(uint8_t location, uint8_t value)
 		break;
 	case VID_STAT_OFFSET:
 		loopback = (value & VID_CTL_LOOPBACK) != 0u;
+		rie = (value & VID_CTL_RIE) != 0u;
 		if (value & VID_CTL_RESET)
 			vid_link_reset();
 		break;

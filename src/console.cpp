@@ -84,7 +84,9 @@ print_status()
 	chip_stepping_print();
 	print_power();
 	printf("!RESET:      %s\n", RESET_IS_ASSERTED ? "asserted" : "released");
-	printf("!IRQ:        %s\n", IRQ_IS_ASSERTED ? "asserted" : "released");
+	printf("!IRQ:        %s (link: %s)\n",
+	       IRQ_IS_ASSERTED ? "asserted" : "released",
+	       vid_link_irq_asserted() ? "asserting" : "idle");
 	bus_engine_print_status();
 	vid_link_print_status();
 	vid_link_mouse_print();
