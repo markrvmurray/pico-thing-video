@@ -35,6 +35,7 @@
 
 #include "hardware/clocks.h"
 #include "hardware/pll.h"
+#include "hardware/structs/powman.h"
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
 
@@ -123,15 +124,23 @@ main()
 #ifdef MEASURE_FREQS
 	measure_freqs();
 #endif
-	// Say which voltage was selected, and whether the regulator agreed:
-	// a clamped request is otherwise invisible, and reads in the source as
-	// though it took effect.
+	// Say which voltage was selected, and whether the regulator will
+	// actually deliver it.
+	//
+	// NOT by reading VSEL back: the limit acts on the regulator's OUTPUT,
+	// not on the register, so a request above 1.30 V latches and reads back
+	// at its full value while the rail sits at 1.30. vreg_get_voltage()
+	// echoes the request and cannot see the clamp. The limit bit can, so
+	// ask that instead. (There is no on-chip sense of the core rail, so
+	// this is an inference, not a measurement.)
 	{
-		const enum vreg_voltage got = vreg_get_voltage();
+		const bool limited = (powman_hw->vreg_ctrl &
+		    POWMAN_VREG_CTRL_DISABLE_VOLTAGE_LIMIT_BITS) == 0u;
+		const bool clamped = limited && ((CORE_VOLTAGE) > VREG_VOLTAGE_MAX);
 		printf("Core0 core voltage %s V for %d MHz%s\n",
 		       CORE_VOLTAGE_V, SYS_CLK_DEFAULT/1000000,
-		       got == (CORE_VOLTAGE) ? "" :
-		       " — CLAMPED (needs vreg_disable_voltage_limit)");
+		       clamped ? " — CLAMPED to 1.30 V, the request exceeds"
+		                 " VREG_VOLTAGE_MAX and the limit is on" : "");
 	}
 
 	printf("Core0 raising sys_clock to %d MHz ... ", SYS_CLK_DEFAULT/1000000);
