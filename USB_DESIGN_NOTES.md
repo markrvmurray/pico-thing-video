@@ -2,8 +2,9 @@
 
 Status: design discussion, 2026-08-09; **decision updated 2026-08-10** (dropped
 the CC-controller IC for a hand-solderable discrete front end — see below).
-Video (HSTX→DVI) and the MC6809 bus peripheral are proven on the v1 dev board;
-USB is the last subsystem for the v2.0 board.
+**Built and proven 2026-09-22**: the chosen front end works, and USB host runs
+a hub with a keyboard and a mouse behind it. Kept as the record of why the
+board looks like this and what was rejected; it is no longer a live plan.
 
 ## Requirement
 
