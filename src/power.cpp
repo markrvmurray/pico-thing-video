@@ -3,6 +3,7 @@
 #include "hardware/adc.h"
 #include "pico/stdlib.h"
 
+#include "adc_convert.h"
 #include "pico_thing_video.h"
 #include "power.h"
 
@@ -13,24 +14,6 @@
 #define POWER_ADC_CHANNEL   6u
 #define DIE_ADC_CHANNEL     (NUM_ADC_CHANNELS - 1u)	/* internal, above the pins */
 
-/* ---- Per-board calibration ---------------------------------------------
- *
- * Both readings are measured against ADC_AVDD -- nominally 3.3 V, in practice
- * whatever this board delivers. NOMINAL VALUES BELOW: measure and correct
- * them before believing an absolute figure.
- *
- * The rail reading scales with the reference, so an error there is a
- * proportional error. The DIE reading does not: it is a small difference
- * between two close voltages divided by a 1.721 mV/degree slope, so a
- * reference error is hugely amplified. A 1.6% low reference shifts the die
- * temperature by about 7 degrees, and it does so while making the rail read
- * high -- reading high and cold together is the signature of a reference left
- * at its nominal value. (The main pico measured 3.2464 V on its own board.)
- *
- * The divider ratio is per-board too: two main-pico boards measured 1.9407
- * and 2.0001 against a nominal 2. */
-#define ADC_VREF_MV         3300u	/* MEASURE ADC_AVDD and correct */
-#define DIVIDER_X1000       2000u	/* MEASURE the divider and correct */
 #define POWER_SAMPLE_US     10000u	/* one sample every 10 ms */
 #define POWER_DEBOUNCE      5u		/* consecutive samples to change state */
 #define POWER_ON_MV         4000u	/* rail above this counts towards on */
@@ -60,9 +43,9 @@ read_channel(uint8_t ch)
 static void
 sample(void)
 {
-	/* 12-bit result against the reference; undo the divider. */
+	/* Conversions (and their calibration) live in adc_convert.h. */
 	const uint32_t raw = read_channel(POWER_ADC_CHANNEL);
-	_mv = (raw * DIVIDER_X1000 * ADC_VREF_MV) / (1000u * 4095u);
+	_mv = adc_rail_mv((uint16_t)raw);
 	_die_raw = read_channel(DIE_ADC_CHANNEL);
 }
 
@@ -127,14 +110,9 @@ power_die_raw(void)
 	return _die_raw;
 }
 
-/* Vbe is 0.706 V at 27 C with a slope of -1.721 mV per degree -- the RP2350's
- * own figures (datasheet 12.4.6), not carried over from the RP2040. Tenths of
- * a degree, in integer arithmetic, because nothing else in this firmware
- * needs float printf and this is not the place to start. */
+/* Tenths of a degree; see adc_convert.h for the conversion and its caveats. */
 extern "C" int32_t
 power_die_decicelsius(void)
 {
-	const int32_t uv = (int32_t)(((uint64_t)_die_raw *
-	    (uint64_t)ADC_VREF_MV * 1000u) / 4095u);
-	return 270 - ((uv - 706000) * 10) / 1721;
+	return adc_die_decicelsius(_die_raw);
 }

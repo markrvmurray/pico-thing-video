@@ -78,4 +78,16 @@ target_include_directories(test_command_parser PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 target_link_libraries(test_command_parser PRIVATE Catch2::Catch2WithMain)
+
+# ---------------------------------------------------------------------------
+# test_adc_convert: the supply and die-temperature conversions, compiled
+# natively.  Pure integer arithmetic in a header, so no firmware sources or
+# SDK headers are involved.
+# ---------------------------------------------------------------------------
+add_executable(test_adc_convert test_adc_convert.cpp)
+target_include_directories(test_adc_convert PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+target_link_libraries(test_adc_convert PRIVATE Catch2::Catch2WithMain)
 catch_discover_tests(test_command_parser)
+catch_discover_tests(test_adc_convert)
