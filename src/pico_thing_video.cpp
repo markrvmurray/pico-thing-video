@@ -235,9 +235,26 @@ main()
 		XOSC_HZ, XOSC_HZ);
 
 	pll_init(pll_usb, 1, 960 * MHZ, 5, 1);   // VCO 960 MHz -> 192 MHz PLL_USB out
+	// EVERYTHING PLL_USB FEEDS has to be re-pointed, not just the obvious
+	// one. The SDK sources clk_usb, clk_adc and (via set_sys_clock_hz)
+	// clk_peri from this PLL, all expecting 48 MHz. Moving the PLL to 192
+	// silently quadruples every one of them, and each fails differently:
+	// the UART garbles (fixed above by moving it to the crystal), and the
+	// ADC -- whose sample-and-hold then gets a quarter of its acquisition
+	// time -- returns readings about 3% LOW, because the sample capacitor
+	// never finishes charging. That one is insidious: nothing errors, the
+	// numbers stay plausible, and a supply monitor quietly under-reads.
+	// Measured on this board: +0.4% at 192 MHz against -2.9% at 320 MHz,
+	// with the rail metered at 5.0000 V in both cases.
+	//
+	// RP2350 has no RTC, so clk_usb, clk_adc and clk_peri are the whole
+	// list. Check it again if the PLL arrangement ever changes.
 	clock_configure(clk_usb, 0,
 		CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
 		192 * MHZ, 48 * MHZ);                // 192 / 4 = 48 MHz for USB
+	clock_configure(clk_adc, 0,
+		CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+		192 * MHZ, 48 * MHZ);                // 192 / 4 = 48 MHz for the ADC
 	clock_configure(clk_hstx, 0,
 		CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
 		192 * MHZ, 192 * MHZ);               // 192 MHz -> 38.4 MHz DVI pixel clock

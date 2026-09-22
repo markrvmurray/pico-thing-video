@@ -43,6 +43,7 @@ uint32_t power_millivolts(void);
  * main pico also found both channels shift while it serves its bus -- the
  * rail high, the die reading far too cold -- which has not yet been
  * characterised on this board. */
+uint16_t power_rail_raw(void);
 uint16_t power_die_raw(void);
 int32_t  power_die_decicelsius(void);
 

@@ -16,6 +16,7 @@
 #include <cstring>
 #include <ctime>
 
+#include "hardware/clocks.h"
 #include "pico/aon_timer.h"
 #include "pico/stdlib.h"
 
@@ -66,8 +67,9 @@ static void
 print_power()
 {
 	const uint32_t mv = power_millivolts();
-	printf("Main 5V:     %lu.%02lu V (%s) — %s\n",
+	printf("Main 5V:     %lu.%02lu V (%u counts) (%s) — %s\n",
 	       (unsigned long)(mv / 1000u), (unsigned long)((mv % 1000u) / 10u),
+	       (unsigned)power_rail_raw(),
 	       power_is_on() ? "present" : "absent",
 	       bus_engine_serving() ? "bus and video serving" : "standby, console only");
 
@@ -95,6 +97,20 @@ print_status()
 	       verbose ? "on" : "off");
 #endif
 	chip_stepping_print();
+
+	/* The clock tree, MEASURED rather than assumed. Two bugs in a row came
+	 * from a clock quietly moving when a PLL was re-pointed underneath it:
+	 * the console at four times its baud, then the ADC sampling four times
+	 * too fast and under-reading. Both were invisible in the source, which
+	 * said what it intended rather than what the hardware was doing. Each
+	 * count takes a millisecond or so, which is nothing beside the cost of
+	 * printing this page. */
+	printf("Clocks:      sys %lu  peri %lu  usb %lu  adc %lu  hstx %lu kHz\n",
+	       (unsigned long)frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS),
+	       (unsigned long)frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_PERI),
+	       (unsigned long)frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_USB),
+	       (unsigned long)frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_ADC),
+	       (unsigned long)frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_HSTX));
 	print_power();
 	printf("!RESET:      %s\n", RESET_IS_ASSERTED ? "asserted" : "released");
 	printf("!IRQ:        %s (link: %s)\n",

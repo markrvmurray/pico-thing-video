@@ -22,6 +22,7 @@
 static bool     _on;
 static uint32_t _mv;
 static uint16_t _die_raw;
+static uint16_t _rail_raw;
 static uint32_t _streak;
 static uint64_t _last_sample_us;
 
@@ -44,8 +45,8 @@ static void
 sample(void)
 {
 	/* Conversions (and their calibration) live in adc_convert.h. */
-	const uint32_t raw = read_channel(POWER_ADC_CHANNEL);
-	_mv = adc_rail_mv((uint16_t)raw);
+	_rail_raw = read_channel(POWER_ADC_CHANNEL);
+	_mv = adc_rail_mv(_rail_raw);
 	_die_raw = read_channel(DIE_ADC_CHANNEL);
 }
 
@@ -102,6 +103,12 @@ extern "C" uint32_t
 power_millivolts(void)
 {
 	return _mv;
+}
+
+extern "C" uint16_t
+power_rail_raw(void)
+{
+	return _rail_raw;
 }
 
 extern "C" uint16_t
