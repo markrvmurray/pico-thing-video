@@ -90,6 +90,7 @@
 // can be a measurement rather than an impression. Cheap enough to leave in:
 // two timer reads per pass, on the core that has no deadline.
 static uint32_t core0_epoch_us;
+static uint32_t core0_serviced_frame;	/* seeded at loop entry, not zero */
 static uint32_t core0_loops;
 static uint64_t render_us;		// total inside vid_link_render()
 static uint32_t render_max_us;		// worst single call
@@ -112,6 +113,10 @@ core0_load_print(void)
 	       (unsigned long)(busy / 10u), (unsigned long)(busy % 10u),
 	       (unsigned long long)render_us, (unsigned long)render_max_us,
 	       (unsigned long long)cursor_us);
+	// Printing this costs frames of its own: the status page is the best
+	// part of a kilobyte, and 115200 baud moves about 11 bytes per
+	// millisecond, so each report blocks this loop for several frames.
+	// The figure therefore includes the cost of asking for it.
 	printf("Frames:      %lu drawn, %lu missed (worst run %lu)\n",
 	       (unsigned long)video_frames,
 	       (unsigned long)frames_missed,
@@ -279,6 +284,12 @@ main()
 
 	console_print_time();
 
+	// Start the frame accounting from where the display actually is. Core 1
+	// brought the video engine up and has been drawing since before this
+	// loop existed; counting those frames as missed charges this core for
+	// time it did not have, and shows up as a large "worst run" that never
+	// happened.
+	core0_serviced_frame = video_frames;
 	core0_epoch_us = time_us_32();
 	for (;;) {
 		core0_loops = core0_loops + 1u;
@@ -300,20 +311,19 @@ main()
 		// spins, and the cursor code lives in flash, so calling it every
 		// time would flood the bus with instruction fetches for no gain.
 		{
-			static uint32_t serviced_frame;
 			const uint32_t f = video_frames;
-			if (f != serviced_frame) {
+			if (f != core0_serviced_frame) {
 				// Frames that went by without a service are the
 				// measure that matters: the display does not
 				// wait, so anything above zero means one pass
 				// round this loop outlasted a frame. That is
 				// the signal Core 0 has run out of time, and
 				// the reason to reach for more of it.
-				const uint32_t skipped = f - serviced_frame - 1u;
+				const uint32_t skipped = f - core0_serviced_frame - 1u;
 				frames_missed += skipped;
 				if (skipped > frames_missed_burst)
 					frames_missed_burst = skipped;
-				serviced_frame = f;
+				core0_serviced_frame = f;
 
 				const uint32_t t0 = time_us_32();
 				vidterm_cursor_service();
