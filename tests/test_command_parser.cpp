@@ -66,11 +66,22 @@ TEST_CASE("keywords are case-insensitive", "[parser]")
 	CHECK(run("EXAMINE").cmd.tag == CMD_EXAMINE);
 }
 
-TEST_CASE("power / on / off are no longer commands", "[parser]")
+TEST_CASE("power reports, and takes no arguments", "[parser]")
 {
-	CHECK_FALSE(run("power").ok);
+	// "power" was removed with the rest of the supervisor role during the
+	// peripheral pivot, then came back as a REPORT-ONLY command when the
+	// board gained 5V-rail sensing. This case asserted its absence and was
+	// never updated, so it outlived the truth it was testing.
+	CHECK(run("power").ok);
+	CHECK(run("power").cmd.tag == CMD_POWER);
+	CHECK(run("pw").ok);
+	CHECK(run("pw").cmd.tag == CMD_POWER);
+	CHECK(run("POWER").ok);
+
+	// There is no power CONTROL on this peripheral -- it follows the host
+	// rail -- so arguments must still be rejected.
 	CHECK_FALSE(run("power on").ok);
-	CHECK_FALSE(run("pw").ok);
+	CHECK_FALSE(run("power off").ok);
 }
 
 TEST_CASE("modify: offset and a single byte", "[parser][modify]")
