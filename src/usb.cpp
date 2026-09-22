@@ -38,10 +38,23 @@ usb_init(void)
 	gpio_init(GPIO_PWR_FAULT);	// !FLT input; the board pulls it up
 #endif
 
-	// Check USB clock frequency
-	uint usb_freq = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_PLL_USB_CLKSRC_PRIMARY);
-	if (usb_freq != 48000)
-		printf("ERROR: USB clock is %u kHz and not 48000 kHz\n",usb_freq);
+	// Check the clock the USB block actually runs on -- clk_usb, NOT the
+	// PLL feeding it. The two differ whenever clk_usb divides its source,
+	// which is exactly what the 320 MHz build does: PLL_USB is raised to
+	// 192 MHz to feed the DVI serialiser and divided by four for USB.
+	// Measuring the PLL there reported 192000 kHz and cried wolf on every
+	// boot, which is worse than not checking at all -- a genuine clocking
+	// failure would have looked identical to the false alarm everyone had
+	// learned to ignore.
+	//
+	// A little tolerance, because this is a measurement: USB full speed
+	// wants 48 MHz, and half a percent is far tighter than anything that
+	// would actually enumerate while still catching a wrong divider or a
+	// PLL change that forgot USB.
+	const uint usb_khz = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_USB);
+	if (usb_khz < 47760u || usb_khz > 48240u)
+		printf("ERROR: clk_usb is %u kHz, not 48000 — USB will not work\n",
+		       usb_khz);
 
 	// TinyUSB stack — role is fixed at build time (single native PHY).
 	tusb_rhport_init_t rh_init = {
