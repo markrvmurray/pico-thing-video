@@ -101,6 +101,7 @@ print_status()
 	       IRQ_IS_ASSERTED ? "asserted" : "released",
 	       vid_link_irq_asserted() ? "asserting" : "idle");
 	bus_engine_print_status();
+	core0_load_print();
 	vid_link_print_status();
 	vid_link_mouse_print();
 	registers::dump();

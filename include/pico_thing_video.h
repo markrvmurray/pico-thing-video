@@ -85,6 +85,11 @@ enum {
 
 void init_pins_range(uint8_t base, uint8_t count);
 
+/* Core 0's own load: time spent rendering, and frames that went by without
+ * being serviced. Frames missed is the figure that decides whether this core
+ * needs more clock -- the display does not wait. */
+void core0_load_print(void);
+
 struct pio_dma {
 	PIO pio;
 	int sm;

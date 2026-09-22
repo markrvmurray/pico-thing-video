@@ -21,11 +21,14 @@
  * core was discipline.
  */
 
-// Build-time toggle (must precede the includes it gates). When defined, clk_sys
-// runs at 320 MHz for more Core-0 grunt rendering the 6809's video commands, and
-// the HSTX/DVI clock is decoupled in main() so the pixel clock stays at 38.4 MHz.
-// Off by default; validate on the bench before relying on it.
-// #define FAST_SYS_CLK_320
+// FAST_SYS_CLK_320 comes from the BUILD, not from here: configure with
+// -DFAST_SYS_CLK_320=ON. When set, clk_sys runs at 320 MHz for more Core-0
+// grunt rendering the 6809's video commands, the HSTX/DVI clock is decoupled
+// onto PLL_USB in main() so the pixel clock stays at 38.4 MHz, and the core
+// voltage is raised. Off by default; validate on the bench before relying on
+// it. (It was a #define here once, which meant a 320 MHz image was an edited
+// source tree rather than a configuration, and an .elf could quietly become
+// the other build on a later rebuild.)
 
 #include <cstdio>
 #include <ctime>
@@ -81,6 +84,39 @@
 // Default pico uart for command-line interactive access
 #define CONSOLE uart0
 #define CONSOLE_BAUDRATE 115200
+
+// ── Core 0 load ─────────────────────────────────────────────────────────────
+// What the rendering core actually spends its time on, so "we need more grunt"
+// can be a measurement rather than an impression. Cheap enough to leave in:
+// two timer reads per pass, on the core that has no deadline.
+static uint32_t core0_epoch_us;
+static uint32_t core0_loops;
+static uint64_t render_us;		// total inside vid_link_render()
+static uint32_t render_max_us;		// worst single call
+static uint64_t cursor_us;		// total inside the overlay service
+static uint32_t frames_missed;		// frames that went by unserviced
+static uint32_t frames_missed_burst;	// most missed between two services
+
+void
+core0_load_print(void)
+{
+	const uint32_t elapsed = time_us_32() - core0_epoch_us;
+	// Busy fraction in tenths of a percent: no float printf in this
+	// firmware, and a load figure is not the reason to start.
+	const uint32_t busy = elapsed ?
+	    (uint32_t)(((render_us + cursor_us) * 1000u) / elapsed) : 0u;
+
+	printf("Core0 loop:  %lu  busy %lu.%lu%% (render %llu us, max %lu us;"
+	       " overlay %llu us)\n",
+	       (unsigned long)core0_loops,
+	       (unsigned long)(busy / 10u), (unsigned long)(busy % 10u),
+	       (unsigned long long)render_us, (unsigned long)render_max_us,
+	       (unsigned long long)cursor_us);
+	printf("Frames:      %lu drawn, %lu missed (worst run %lu)\n",
+	       (unsigned long)video_frames,
+	       (unsigned long)frames_missed,
+	       (unsigned long)frames_missed_burst);
+}
 
 #ifdef MEASURE_FREQS
 static void
@@ -219,12 +255,22 @@ main()
 
 	console_print_time();
 
+	core0_epoch_us = time_us_32();
 	for (;;) {
+		core0_loops = core0_loops + 1u;
+
 		console_poll();
 		power_task();
 
 		// Render the guest's command stream here, off the bus core.
-		vid_link_render();
+		{
+			const uint32_t t0 = time_us_32();
+			vid_link_render();
+			const uint32_t dt = time_us_32() - t0;
+			render_us += dt;
+			if (dt > render_max_us)
+				render_max_us = dt;
+		}
 
 		// Cursor, once per frame rather than once per pass: this loop
 		// spins, and the cursor code lives in flash, so calling it every
@@ -233,8 +279,21 @@ main()
 			static uint32_t serviced_frame;
 			const uint32_t f = video_frames;
 			if (f != serviced_frame) {
+				// Frames that went by without a service are the
+				// measure that matters: the display does not
+				// wait, so anything above zero means one pass
+				// round this loop outlasted a frame. That is
+				// the signal Core 0 has run out of time, and
+				// the reason to reach for more of it.
+				const uint32_t skipped = f - serviced_frame - 1u;
+				frames_missed += skipped;
+				if (skipped > frames_missed_burst)
+					frames_missed_burst = skipped;
 				serviced_frame = f;
+
+				const uint32_t t0 = time_us_32();
 				vidterm_cursor_service();
+				cursor_us += time_us_32() - t0;
 			}
 		}
 
