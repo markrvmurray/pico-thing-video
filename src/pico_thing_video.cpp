@@ -205,6 +205,30 @@ main()
 	// enumeration on hardware before relying on it. Note: usb_init()'s
 	// "USB clock != 48000 kHz" check measures the PLL_USB *primary* output, which
 	// is now 192 MHz — that warning is expected and cosmetic (clk_usb is 48 MHz).
+	// FIRST, get the console off PLL_USB.
+	//
+	// set_sys_clock_hz() deliberately parks clk_peri on PLL_USB at 48 MHz,
+	// so that peripherals keep a clock which does not move when clk_sys
+	// does (PICO_CLOCK_ADJUST_PERI_CLOCK_WITH_SYS_CLOCK defaults off).
+	// Moving PLL_USB to 192 MHz for the DVI clock therefore drags clk_peri
+	// with it -- four times too fast -- while the SDK goes on believing it
+	// is 48 MHz. uart_init() below reads that cached figure, so it computes
+	// a divisor four times wrong and the console emits garbage. Re-
+	// initialising the UART does NOT fix that on its own: the number it
+	// works from is the lie.
+	//
+	// clock_configure() sets the hardware AND updates the cached frequency,
+	// which is what makes the later uart_init() correct. Point clk_peri at
+	// the crystal rather than at either PLL: the console is then immune to
+	// any future experiment with the clock tree, which is precisely the
+	// thing one wants working while experimenting with the clock tree.
+	// clk_peri's divider is two bits (1 to 3), so it could not have divided
+	// 192 back down to 48 in any case.
+	stdio_flush();
+	clock_configure(clk_peri, 0,
+		CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_XOSC_CLKSRC,
+		XOSC_HZ, XOSC_HZ);
+
 	pll_init(pll_usb, 1, 960 * MHZ, 5, 1);   // VCO 960 MHz -> 192 MHz PLL_USB out
 	clock_configure(clk_usb, 0,
 		CLOCKS_CLK_USB_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
