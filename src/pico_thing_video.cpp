@@ -56,10 +56,25 @@
 // The bus PIO runs off clk_sys at div=1, still far faster than the ~1-2 MHz 6809.
 // FAST_SYS_CLK_320 (toggle at the top of this file) selects 320 MHz instead,
 // with clk_hstx decoupled in main() to hold the pixel clock at 38.4 MHz.
+//
+// Core voltage is chosen HERE, beside the clock it exists for, because the two
+// are a pair: raising one without the other is either unstable or needlessly
+// hot. vreg_set_voltage() does not know or care what clk_sys is doing.
+//
+// Careful if raising this: the SDK SILENTLY CLAMPS any request above
+// VREG_VOLTAGE_MAX (1.30 V) unless vreg_disable_voltage_limit() is called
+// first. Code can therefore ask for 2.0 V, read as though it runs at 2.0 V,
+// and actually run at 1.30 V -- which is the case on the main pico, whose
+// reliable 320 MHz is in fact achieved at 1.30 V. The boot line below reports
+// a clamp rather than letting it hide.
 #ifdef FAST_SYS_CLK_320
 #define SYS_CLK_DEFAULT 320000000
+#define CORE_VOLTAGE    VREG_VOLTAGE_1_30
+#define CORE_VOLTAGE_V  "1.30"
 #else
 #define SYS_CLK_DEFAULT 192000000
+#define CORE_VOLTAGE    VREG_VOLTAGE_DEFAULT	/* 1.10 V, the power-up value */
+#define CORE_VOLTAGE_V  "1.10"
 #endif
 
 // Default pico uart for command-line interactive access
@@ -91,14 +106,9 @@ measure_freqs()
 int
 main()
 {
-#ifdef FAST_SYS_CLK_320
-	// 320 MHz needs a core-voltage bump. Verify stability/thermals on hardware.
-	vreg_set_voltage(VREG_VOLTAGE_1_30);
-#else
-	// 192 MHz is only a mild overclock; the default core voltage is enough
-	// (pico-vidterm ran 192 MHz at stock voltage).
-	vreg_set_voltage(VREG_VOLTAGE_1_10);
-#endif
+	// Voltage first, then frequency, with time to settle between: the clock
+	// is raised further down, after stdio is up.
+	vreg_set_voltage(CORE_VOLTAGE);
 	sleep_ms(5);
 
 	gpio_set_function(GPIO_UART_TX, UART_FUNCSEL_NUM(uart0, GPIO_UART_TX));
@@ -113,10 +123,29 @@ main()
 #ifdef MEASURE_FREQS
 	measure_freqs();
 #endif
+	// Say which voltage was selected, and whether the regulator agreed:
+	// a clamped request is otherwise invisible, and reads in the source as
+	// though it took effect.
+	{
+		const enum vreg_voltage got = vreg_get_voltage();
+		printf("Core0 core voltage %s V for %d MHz%s\n",
+		       CORE_VOLTAGE_V, SYS_CLK_DEFAULT/1000000,
+		       got == (CORE_VOLTAGE) ? "" :
+		       " — CLAMPED (needs vreg_disable_voltage_limit)");
+	}
+
 	printf("Core0 raising sys_clock to %d MHz ... ", SYS_CLK_DEFAULT/1000000);
 	if (!set_sys_clock_hz(SYS_CLK_DEFAULT, false)) {
 		printf("unsuccessful! Reverting to %d MHz ... ", SYS_CLK_HZ/1000000);
 		set_sys_clock_hz(SYS_CLK_HZ, true);
+		// Drop the voltage back: it was raised for a clock we did not
+		// get, and the fallback needs no more than the default. Order
+		// matters -- frequency down first, then voltage. Without this a
+		// failed clock change half-reverts, leaving the part hot for no
+		// benefit in exactly the situation where something is already
+		// wrong.
+		vreg_set_voltage(VREG_VOLTAGE_DEFAULT);
+		printf("core voltage back to 1.10 V ... ");
 	}
 
 #ifdef FAST_SYS_CLK_320
