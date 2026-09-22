@@ -1,18 +1,21 @@
-/* usb_host.cpp — USB HID host: keyboard + mouse (via hub), cooked into a
- * byte-oriented event stream. Compiled only in host builds (USB_HOST_MODE).
+/* usb_host.cpp -- USB HID host: keyboard + mouse (via hub). Compiled only in
+ * host builds (USB_HOST_MODE).
  *
- * The 6809 sees a parsimonious register interface: one shared STATUS bit
- * (EVT_AVAIL, !IRQ-backed) plus one DATA port read repeatedly to walk the
- * cooked-event stream. That register/PIO wiring (pop-on-read) is a follow-on,
- * gated on validating the bus path against a real 6809. For first-light this
- * file cooks HID reports into the same event bytes and echoes them to UART0, so
- * the whole host path (hub + HID enumeration + cooking) is bench-validatable
- * without the bus.
+ * Both devices reach the 6809 through the video link's register window, and
+ * they reach it by different routes because they want different shapes:
  *
- * "Cooked" means the guest never sees raw HID: keystrokes arrive as final
- * characters (UK layout), and the mouse arrives as discrete gestures (click,
- * double-click, drag, scroll) with text-cell coordinates — so mouse motion
- * cannot storm the interrupt.
+ *   Keyboard -> VID.Data, one cooked byte per keystroke. "Cooked" means the
+ *   guest never sees raw HID: UK layout, caps-lock XOR shift, Ctrl chords
+ *   folded to C0, so what arrives is a final character.
+ *
+ *   Mouse -> VID.Mouse, a polled snapshot of position and buttons. Motion is
+ *   never pushed, so it cannot storm the guest however fast the mouse moves.
+ *   The 6809 keeps the click counting and hold timers, as its driver already
+ *   does for CoCo3 hardware.
+ *
+ * Coordinates handed over are raw framebuffer pixels. The text-cell figures in
+ * the console echo below are a convenience for reading the output against the
+ * character grid, not a limit on what clients can have.
  *
  * Copyright (c) 2026 Mark R V Murray.
  * SPDX-License-Identifier: BSD-2-Clause
@@ -33,108 +36,21 @@
 #define USB_HOST_ECHO 1
 #endif
 
-/* ---- Cooked event headers (see the plan's protocol table) ---------------- */
-enum : uint8_t {
-	EVT_KEY         = 0x01, /* payload: 1 byte cooked key                    */
-	EVT_L_CLICK     = 0x10, /* payload: col, row                             */
-	EVT_R_CLICK     = 0x11,
-	EVT_L_DCLICK    = 0x12,
-	EVT_R_DCLICK    = 0x13,
-	EVT_L_DRAG      = 0x14,
-	EVT_R_DRAG      = 0x15,
-	EVT_SCROLL_UP   = 0x16, /* no payload                                    */
-	EVT_SCROLL_DOWN = 0x17,
-};
-
 /* Screen geometry (FB_WIDTH/FB_HEIGHT, CHAR_W/H, TEXT_COLS/ROWS) comes from
- * video.h — the single source of truth — so the cursor->cell mapping cannot
+ * video.h -- the single source of truth -- so the cursor->cell mapping cannot
  * drift from the framebuffer. */
-
-/* ---- Gesture tuning ------------------------------------------------------ */
-static constexpr uint32_t DCLICK_MS = 400;  /* max gap between clicks        */
-static constexpr int      DRAG_PX   = 4;    /* motion past this = drag       */
-
-/* ======================================================================== *
- *  Event FIFO (byte ring). Single-producer (Core 0 cooking) for now; the
- *  pop-on-read advance IRQ becomes the consumer once the bus is wired. Uses
- *  the same power-of-two ring discipline as the bus write path.
- * ======================================================================== */
-static constexpr uint16_t EVT_FIFO_SIZE = 256;         /* power of two       */
-static volatile uint8_t   evt_buf[EVT_FIFO_SIZE];
-static volatile uint16_t  evt_head = 0;                /* producer           */
-static volatile uint16_t  evt_tail = 0;                /* consumer (future)  */
-
-static inline void
-evt_push(uint8_t b)
-{
-	uint16_t next = (uint16_t)((evt_head + 1) & (EVT_FIFO_SIZE - 1));
-	if (next == evt_tail)
-		return;                                /* full — drop (echo still shows it) */
-	evt_buf[evt_head] = b;
-	evt_head = next;
-}
-
-/* Public: has the event stream got anything? (STATUS.EVT_AVAIL source.) */
-extern "C" bool
-usb_host_events_pending(void)
-{
-	return evt_head != evt_tail;
-}
-
-/* ======================================================================== *
- *  Cooked-event emitters (push to FIFO + optional UART echo)
- * ======================================================================== */
-#if USB_HOST_ECHO
-static const char *
-evt_name(uint8_t hdr)
-{
-	switch (hdr) {
-	case EVT_L_CLICK:     return "L_CLICK";
-	case EVT_R_CLICK:     return "R_CLICK";
-	case EVT_L_DCLICK:    return "L_DCLICK";
-	case EVT_R_DCLICK:    return "R_DCLICK";
-	case EVT_L_DRAG:      return "L_DRAG";
-	case EVT_R_DRAG:      return "R_DRAG";
-	case EVT_SCROLL_UP:   return "SCROLL_UP";
-	case EVT_SCROLL_DOWN: return "SCROLL_DOWN";
-	default:              return "?";
-	}
-}
-#endif
 
 static void
 emit_key(uint8_t c)
 {
-	/* M4: keystrokes feed the guest console as plain bytes. The local
-	 * event FIFO and UART echo stay as diagnostics. */
+	/* Keystrokes feed the guest console as plain bytes; the UART echo is
+	 * a bring-up aid. */
 	vid_link_input(c);
-	evt_push(EVT_KEY);
-	evt_push(c);
 #if USB_HOST_ECHO
 	if (c >= ' ' && c < 0x7F)
 		printf("KEY '%c' (0x%02X)\n", (char)c, c);
 	else
 		printf("KEY 0x%02X\n", c);
-#endif
-}
-
-static void
-emit_coord(uint8_t hdr, int col, int row)
-{
-	evt_push(hdr);
-	evt_push((uint8_t)col);
-	evt_push((uint8_t)row);
-#if USB_HOST_ECHO
-	printf("%s col=%d row=%d\n", evt_name(hdr), col, row);
-#endif
-}
-
-static void
-emit_simple(uint8_t hdr)
-{
-	evt_push(hdr);
-#if USB_HOST_ECHO
-	printf("%s\n", evt_name(hdr));
 #endif
 }
 
@@ -237,22 +153,10 @@ process_kbd(const hid_keyboard_report_t *r)
 }
 
 /* ======================================================================== *
- *  Mouse cooking — absolute cursor + gesture recognition.
+ *  Mouse — absolute cursor from relative HID deltas.
  * ======================================================================== */
 static int cursor_x = FB_WIDTH  / 2;   /* pixels, clamped to screen */
 static int cursor_y = FB_HEIGHT / 2;
-
-struct button_state {
-	bool     down;
-	uint32_t down_ms;
-	int      down_x, down_y;           /* pixel position at press */
-	bool     dragging;
-	int      drag_col, drag_row;       /* last cell a drag event was emitted for */
-	uint32_t last_click_ms;            /* for double-click detection */
-	int      last_click_col, last_click_row;
-};
-static button_state btn_left  = {};
-static button_state btn_right = {};
 
 static inline int clampi(int v, int lo, int hi)
 { return v < lo ? lo : (v > hi ? hi : v); }
@@ -260,72 +164,46 @@ static inline int clampi(int v, int lo, int hi)
 static inline int cur_col(void) { return clampi(cursor_x / CHAR_W, 0, TEXT_COLS - 1); }
 static inline int cur_row(void) { return clampi(cursor_y / CHAR_H, 0, TEXT_ROWS - 1); }
 
-/* Handle one button's transitions. drag_hdr/click_hdr/dclick_hdr select L vs R. */
+/* Report a button edge on the console. This is a BRING-UP AID, not a
+ * protocol: it was how clicks were first confirmed with no guest driver in
+ * existence, and it stays for that. Deliberately no click counting, drag
+ * threshold or double-click window -- that timing belongs to the 6809, which
+ * does it from the snapshot's buttons and pressed-since bytes, and a second
+ * implementation here would only be a second thing to disagree.
+ *
+ * Pixels first, cells after: the guest register carries raw framebuffer
+ * coordinates, and reporting only cells understated the resolution clients
+ * actually get. */
 static void
-process_button(button_state *b, bool now, uint32_t t,
-	uint8_t drag_hdr, uint8_t click_hdr, uint8_t dclick_hdr)
+report_button(const char *name, bool now, bool *was)
 {
-	if (now && !b->down) {
-		/* press */
-		b->down     = true;
-		b->down_ms  = t;
-		b->down_x   = cursor_x;
-		b->down_y   = cursor_y;
-		b->dragging = false;
-		b->drag_col = cur_col();
-		b->drag_row = cur_row();
-	} else if (now && b->down) {
-		/* held — promote to drag once motion passes the threshold */
-		int dx = cursor_x - b->down_x;
-		int dy = cursor_y - b->down_y;
-		if (!b->dragging && (dx*dx + dy*dy) >= DRAG_PX*DRAG_PX)
-			b->dragging = true;
-		if (b->dragging) {
-			int col = cur_col(), row = cur_row();
-			if (col != b->drag_col || row != b->drag_row) {
-				b->drag_col = col;
-				b->drag_row = row;
-				emit_coord(drag_hdr, col, row);   /* rate-limited: only on cell change */
-			}
-		}
-	} else if (!now && b->down) {
-		/* release */
-		b->down = false;
-		if (!b->dragging) {
-			int col = cur_col(), row = cur_row();
-			bool near = (col == b->last_click_col && row == b->last_click_row);
-			if (near && (t - b->last_click_ms) <= DCLICK_MS) {
-				emit_coord(dclick_hdr, col, row);
-				b->last_click_ms = 0;             /* consumed — no triple chaining */
-			} else {
-				emit_coord(click_hdr, col, row);
-				b->last_click_ms   = t;
-				b->last_click_col  = col;
-				b->last_click_row  = row;
-			}
-		}
-		b->dragging = false;
-	}
+	if (now == *was)
+		return;
+	*was = now;
+#if USB_HOST_ECHO
+	printf("MOUSE %s %s at %d,%d (col %d row %d)\n",
+	       name, now ? "down" : "up",
+	       cursor_x, cursor_y, cur_col(), cur_row());
+#else
+	(void)name;
+#endif
 }
 
 static void
 process_mouse(const hid_mouse_report_t *r)
 {
-	uint32_t t = to_ms_since_boot(get_absolute_time());
-
 	/* Accumulate relative motion into the absolute cursor, clamp to screen. */
 	cursor_x = clampi(cursor_x + r->x, 0, FB_WIDTH  - 1);
 	cursor_y = clampi(cursor_y + r->y, 0, FB_HEIGHT - 1);
 
-	process_button(&btn_left,  (r->buttons & MOUSE_BUTTON_LEFT)  != 0, t,
-		EVT_L_DRAG, EVT_L_CLICK, EVT_L_DCLICK);
-	process_button(&btn_right, (r->buttons & MOUSE_BUTTON_RIGHT) != 0, t,
-		EVT_R_DRAG, EVT_R_CLICK, EVT_R_DCLICK);
-
-	/* Wheel: one event per notch. */
-	int w = r->wheel;
-	while (w > 0) { emit_simple(EVT_SCROLL_UP);   w--; }
-	while (w < 0) { emit_simple(EVT_SCROLL_DOWN); w++; }
+	static bool was_left, was_right, was_middle;
+	report_button("left",   (r->buttons & MOUSE_BUTTON_LEFT)   != 0, &was_left);
+	report_button("right",  (r->buttons & MOUSE_BUTTON_RIGHT)  != 0, &was_right);
+	report_button("middle", (r->buttons & MOUSE_BUTTON_MIDDLE) != 0, &was_middle);
+#if USB_HOST_ECHO
+	if (r->wheel)
+		printf("MOUSE wheel %+d\n", (int)r->wheel);
+#endif
 
 	/* Publish the raw state for the guest. The cooked gestures above stay
 	 * as local diagnostics; the guest gets position and buttons and does
