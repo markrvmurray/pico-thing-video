@@ -103,6 +103,8 @@ BISON_TARGET(CmdParser
 ADD_FLEX_BISON_DEPENDENCY(CmdLexer CmdParser)
 
 add_executable(pico-thing-video
+		src/bus_engine.cpp
+		src/console.cpp
 		src/pico_thing_video.cpp
 		src/power.cpp
 		src/i2c_service.cpp

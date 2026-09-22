@@ -6,8 +6,19 @@
  * Pico2 (RP2350) firmware acting as a slave peripheral on an external
  * MC6809E bus. The host system supplies the E/Q clocks and drives the
  * address/data bus; this Pico watches its !CS and services byte reads and
- * writes to an 8-byte register window at $FF10. A video processor and USB
- * host (keyboard/mouse) will be layered on top of this window later.
+ * writes to an 8-byte register window at $FF10, through which it also serves
+ * DVI video and USB HID input.
+ *
+ * THIS FILE is startup and the Core 0 loop: clocks and core voltage, the
+ * one-off bring-up order, and the round-robin of console, power sensing and
+ * rendering. The two halves it starts live apart on purpose --
+ *
+ *   bus_engine.cpp  hard real-time: bus PIO/DMA, the ISRs, Core 1.
+ *   console.cpp     the slow path: command dispatch and status.
+ *
+ * -- because they have opposite deadline classes and were previously in one
+ * file, where the only thing keeping unbounded console work out of the bus
+ * core was discipline.
  */
 
 // Build-time toggle (must precede the includes it gates). When defined, clk_sys
@@ -16,51 +27,28 @@
 // Off by default; validate on the bench before relying on it.
 // #define FAST_SYS_CLK_320
 
-#include <cctype>
 #include <cstdio>
-#include <cstring>
-#include <cstdlib>
 #include <ctime>
 
 #include "pico/aon_timer.h"
-#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
-#include "pico/multicore.h"
 
 #include "hardware/clocks.h"
-#ifdef FAST_SYS_CLK_320
 #include "hardware/pll.h"
-#endif
-#include "hardware/dma.h"
-#include "hardware/irq.h"
-#include "hardware/pio.h"
 #include "hardware/vreg.h"
+#include "hardware/watchdog.h"
 
-#include "tusb.h"
-#include "usb.h"
-#include "power.h"
-#include "i2c_service.h"
-#include "chip_stepping.h"
-#include "registers.h"
-#include "pico_thing_video.h"
 #include "build_time.h"
-#include "command_parser.h"
+#include "bus_engine.h"
+#include "chip_stepping.h"
+#include "console.h"
+#include "i2c_service.h"
+#include "pico_thing_video.h"
+#include "power.h"
+#include "usb.h"
+#include "vid_link.h"
 #include "video.h"
 #include "video_render.h"   // video_frames, the cursor blink timebase
-#include "vid_link.h"
-
-/* Flex/bison generated scanner API (yy_buffer_state is flex's internal type) */
-extern "C" {
-struct yy_buffer_state;
-typedef struct yy_buffer_state *YY_BUFFER_STATE;
-extern YY_BUFFER_STATE cmd_yy_scan_string(const char *);
-extern void            cmd_yy_delete_buffer(YY_BUFFER_STATE);
-extern int             cmd_yyparse(parsed_cmd_t *);
-extern void            cmd_yy_reset_str_pool(void);
-}
-
-// PIO program headers generated from the .pio file
-#include "pico_thing_video.pio.h"
 
 // ── System clock ────────────────────────────────────────────────────────────
 // Default 192 MHz: the HSTX DVI serialiser divides clk_sys to a 38.4 MHz pixel
@@ -78,677 +66,6 @@ extern void            cmd_yy_reset_str_pool(void);
 #define CONSOLE uart0
 #define CONSOLE_BAUDRATE 115200
 
-#define COMMAND_BUFFER_LEN 256u
-
-volatile bool verbose = false;
-
-// --- PIO / DMA resources ---
-// Read responder on pio0; write capturer on pio1. Each uses a two-channel DMA
-// chain: an address channel feeds the target register address from the PIO,
-// and a data channel moves the byte to/from the register window.
-#define BUS_READ_PIO  pio0
-#define BUS_WRITE_PIO pio1
-
-static pio_dma piodma_read = {
-	BUS_READ_PIO,
-	0,
-	0,
-	1,
-	DMA_IRQ_0
-};
-
-static pio_dma piodma_write = {
-	BUS_WRITE_PIO,
-	0,
-	4,
-	5,
-	DMA_IRQ_1
-};
-
-// PIO program offsets (needed for pio_remove_program on shutdown)
-static int pio_read_offset;
-static int pio_write_offset;
-
-static volatile bool core1_initialised = false;
-
-// --- Core 1 diagnostics ---
-static volatile uint32_t core1_loop_count = 0u;
-static volatile uint32_t core1_isr_count = 0u;
-static volatile uint8_t  core1_last_write_loc = 0u;
-static volatile uint8_t  core1_last_read_loc = 0u;
-
-// --- Bus read notification ---
-// The read DMA auto-returns read_registers[addr] to the host. The ISR records
-// the location so Core 1 can apply side effects (e.g. auto-clearing status
-// registers) for device sub-registers added later.
-static volatile bool    read_irq_received = false;
-static volatile uint8_t read_location = 0u;
-// Per-offset tally of guest reads. `Last read` alone only names the most
-// recent offset, which cannot distinguish "the guest is polling steadily"
-// from "the guest read once and stopped" — a distinction that cost a long
-// hunt once, when a stalled console turned out to be the guest never issuing
-// a read rather than anything in the serve path. Counting per offset shows
-// the access pattern directly: a status register polled at a steady rate,
-// a data register read only when the guest consumes, and reserved offsets
-// that should stay at zero.
-static volatile uint32_t read_offset_count[registers::register_length];
-
-// --- Bus write ring ---
-// The write DMA stores the guest byte into write_registers[addr]. The ISR
-// mirrors it into the read side and pushes {location, value} here for Core 1
-// to dispatch. Replaces a single-slot notification that dropped back-to-back
-// writes arriving faster than the for(;;) loop could drain them.
-struct write_entry {
-	uint8_t location;
-	uint8_t value;
-};
-static constexpr uint8_t WRITE_RING_SIZE = 32u;  // must be power of 2
-static constexpr uint8_t WRITE_RING_MASK = WRITE_RING_SIZE - 1u;
-static volatile write_entry write_ring[WRITE_RING_SIZE];
-static volatile uint8_t write_ring_head = 0u;    // written by ISR
-static volatile uint8_t write_ring_tail = 0u;    // read by for(;;) loop
-
-// ISR for the R/!W bus read loop and DMA chain.
-// The read DMA has already handed read_registers[addr] to the host; we only
-// record which location was read for optional Core 1 side effects.
-void __isr
-__time_critical_func(dma_bus_read_irq_handler())
-{
-	dma_channel_acknowledge_irq0(piodma_read.data_channel);
-	core1_isr_count++;
-	const uintptr_t read_addr = dma_channel_hw_addr(piodma_read.data_channel)->read_addr;
-	read_location = read_addr & registers::register_mask;
-	read_offset_count[read_location]++;
-	read_irq_received = true;
-	// Pop-on-read for the link's Data register happens HERE, not in the
-	// Core 1 loop: every guest read gets its own ISR invocation (6809 bus
-	// reads are far slower than this tier's latency), so the pop can
-	// neither be lost to mailbox overwrite nor double-counted.
-	vid_link_guest_read(read_location);
-	if (read_location == VID_MOUSE_OFFSET)
-		vid_link_mouse_read();
-}
-
-// ISR for the R/!W bus write loop and DMA chain.
-// The write DMA has stored the guest byte into write_registers[addr]. Mirror it
-// into the read side so the host reads back what it wrote, then queue it for
-// Core 1 to dispatch any device side effects.
-void __isr
-__time_critical_func(dma_bus_write_irq_handler())
-{
-	dma_channel_acknowledge_irq1(piodma_write.data_channel);
-	core1_isr_count++;
-	const uintptr_t written_addr = dma_channel_hw_addr(piodma_write.data_channel)->write_addr;
-	const uint8_t wloc = written_addr & registers::register_mask;
-	const uint8_t wval = *reinterpret_cast<volatile uint8_t *>(written_addr);
-	// Mirror into the read side (scratch-register behaviour for the
-	// reserved registers). The link offsets are NOT mirrored: their read
-	// side is device-owned (VID.Data stages the input head byte, VID.Stat
-	// the status, VID.Mouse the pointer snapshot), and a guest write must
-	// not clobber it.
-	if (wloc > VID_MOUSE_OFFSET)
-		reg[wloc] = wval;
-	// Mouse re-latch/resync happens HERE rather than on the Core 1 drain:
-	// a guest may read $FF12 in the very next instruction, which would
-	// race the drain, and this write exists precisely to leave the guest
-	// in a known state.
-	if (wloc == VID_MOUSE_OFFSET)
-		vid_link_mouse_write();
-	// Queue for Core 1.
-	const uint8_t h = write_ring_head;
-	const uint8_t next_h = (h + 1u) & WRITE_RING_MASK;
-	if (next_h == write_ring_tail)
-		write_ring_tail = (write_ring_tail + 1u) & WRITE_RING_MASK;
-	write_ring[h].location = wloc;
-	write_ring[h].value = wval;
-	write_ring_head = next_h;
-}
-
-static void
-peripheral_clear()
-{
-	registers::clear();
-}
-
-static void
-print_time()
-{
-	tm tm{};
-	if (aon_timer_get_time_calendar(&tm)) // gives POSIX timespec
-		printf("%04d-%02d-%02d %02d:%02d:%02d UTC\n",
-		       tm.tm_year + 1900,
-		       tm.tm_mon + 1,
-		       tm.tm_mday,
-		       tm.tm_hour,
-		       tm.tm_min,
-		       tm.tm_sec);
-	else
-		printf("Unable to get calendar time\n");
-}
-
-#define ANSI_CLEAR_SCREEN "\033[2J"
-#define ANSI_CURSOR_HOME   "\033[H"
-
-static void
-print_power()
-{
-	const uint32_t mv = power_millivolts();
-	printf("Main 5V:     %lu.%02lu V (%s) — %s\n",
-	       (unsigned long)(mv / 1000u), (unsigned long)((mv % 1000u) / 10u),
-	       power_is_on() ? "present" : "absent",
-	       core1_initialised ? "bus and video serving" : "standby, console only");
-}
-
-static void
-print_status()
-{
-	printf("Verbose:     %s\n", verbose ? "on" : "off");
-	chip_stepping_print();
-	print_power();
-	printf("!RESET:      %s\n", RESET_IS_ASSERTED ? "asserted" : "released");
-	printf("!IRQ:        %s\n", IRQ_IS_ASSERTED ? "asserted" : "released");
-	printf("Core1 loop:  %lu  isr: %lu\n",
-	       (unsigned long)core1_loop_count, (unsigned long)core1_isr_count);
-	printf("Last write:  %02X  last read: %02X\n",
-	       core1_last_write_loc, core1_last_read_loc);
-	vid_link_print_status();
-	vid_link_mouse_print();
-	printf("Guest reads: FF10=%lu FF11=%lu (others %lu)\n",
-	       (unsigned long)read_offset_count[0], (unsigned long)read_offset_count[1],
-	       (unsigned long)(read_offset_count[2] + read_offset_count[3] +
-	           read_offset_count[4] + read_offset_count[5] +
-	           read_offset_count[6] + read_offset_count[7]));
-	registers::dump();
-}
-
-/* cmd_parse() - glue between process_command() and the flex/bison parser */
-bool
-cmd_parse(char *input, parsed_cmd_t *out)
-{
-	out->tag = CMD_NONE;
-	cmd_yy_reset_str_pool();
-	YY_BUFFER_STATE buf = cmd_yy_scan_string(input);
-	int rc = cmd_yyparse(out);
-	cmd_yy_delete_buffer(buf);
-	/* YYERROR in grammar actions does not invoke yyerror(), so cmd.tag may
-	 * remain CMD_NONE on failure.  Normalise to CMD_SYNTAX_ERROR. */
-	if (rc != 0 && out->tag == CMD_NONE)
-		out->tag = CMD_SYNTAX_ERROR;
-	return rc == 0;
-}
-
-static void set_power();
-
-// Push a single {location, value} write into the ring so the Core 1 dispatch
-// loop treats a console modify the same as a guest bus write.
-static void
-inject_write(uint8_t loc, uint8_t val)
-{
-	const uint8_t h = write_ring_head;
-	const uint8_t next_h = (h + 1u) & WRITE_RING_MASK;
-	if (next_h == write_ring_tail)
-		write_ring_tail = (write_ring_tail + 1u) & WRITE_RING_MASK;
-	write_ring[h].location = loc;
-	write_ring[h].value = val;
-	write_ring_head = next_h;
-}
-
-static void
-process_command(char *buf)
-{
-	uint8_t buffer[64];
-	parsed_cmd_t cmd;
-
-	/* Skip blank lines */
-	while (isspace(static_cast<unsigned char>(*buf)))
-		buf++;
-	if (*buf == '\0')
-		return;
-
-	if (!cmd_parse(buf, &cmd))
-		return; /* error message already printed by parser */
-
-	switch (cmd.tag) {
-
-	case CMD_VERBOSE:
-		verbose = !verbose;
-		printf("Verbose mode %s\n", verbose ? "on" : "off");
-		break;
-
-	case CMD_STATUS: {
-		print_status();
-		/* Optional repeat: redraw every period ms until any key. */
-		uint32_t period = cmd.status.period;
-		while (period > 0u) {
-			for (uint32_t i = 0u; i < period; i++) {
-				usb_poll();
-				power_task();
-				if (getchar_timeout_us(0) != PICO_ERROR_TIMEOUT)
-					goto status_done;
-				sleep_ms(1u);
-			}
-			printf("%s%s", ANSI_CLEAR_SCREEN, ANSI_CURSOR_HOME);
-			print_status();
-		}
-status_done:
-		break;
-	}
-
-	case CMD_HELP:
-		// Keep this in step with the grammar in command_parser.y and the
-		// keyword table in command_lexer.l.  Every command has a two-letter
-		// alias except "help"; keywords and hex are case-insensitive.
-		printf(
-		"\nAll numbers are hex unless stated.  Two-letter aliases in brackets.\n"
-		"\n--- Registers ---\n"
-		"  examine            (ex)  dump the 8-byte register window\n"
-		"  modify <off> <b>.. (mo)  write bytes from offset off (0..7)\n"
-		"  fill [v]           (fi)  fill the window with v (default 00)\n"
-		"\n--- Host ---\n"
-		"  status [period]    (st)  status; period (decimal ms) repeats\n"
-		"                           until a key is pressed\n"
-		"  power              (pw)  show the sensed main 5V rail\n"
-		"  i2c                (ic)  report HPD and scan the HDMI DDC bus\n"
-		"  time [y m d h m s] (ti)  show or set the clock (decimal)\n"
-#if !USB_HOST_MODE
-		"  usb <args>         (ub)  send words to the USB CDC guest console\n"
-#endif
-		"  verbose            (vb)  toggle verbose output\n"
-		"  help               (h)   this text\n"
-		"\nThe peripheral follows the main 5V rail: bus and video serve only\n"
-		"while it is up; on power loss the firmware restarts into standby\n"
-		"(console only) and waits for power to return.\n\n");
-		break;
-
-	case CMD_POWER:
-		print_power();
-		break;
-
-	case CMD_I2C_SCAN:
-		i2c_scan();
-		break;
-
-	case CMD_TIME_QUERY:
-		print_time();
-		break;
-
-	case CMD_TIME_SET: {
-		tm tm = {};
-		tm.tm_mday  = 1;
-		tm.tm_year  = cmd.time.year - 1900;
-		if (cmd.time.count >= 2) tm.tm_mon  = cmd.time.month; /* already 0-based from grammar */
-		if (cmd.time.count >= 3) tm.tm_mday = cmd.time.day;
-		if (cmd.time.count >= 4) tm.tm_hour = cmd.time.hour;
-		if (cmd.time.count >= 5) tm.tm_min  = cmd.time.minute;
-		if (cmd.time.count >= 6) tm.tm_sec  = cmd.time.second;
-		aon_timer_set_time_calendar(&tm);
-		print_time();
-		break;
-	}
-
-	case CMD_EXAMINE:
-		registers::dump();
-		break;
-
-	case CMD_MODIFY: {
-		const uint8_t off   = cmd.modify.start & registers::register_mask;
-		const uint8_t count = cmd.modify.count;
-		for (uint8_t i = 0; i < count; i++) {
-			const uint8_t loc = (off + i) & registers::register_mask;
-			const uint8_t val = cmd.modify.data[i];
-			registers::write(loc) = val;	// write side
-			reg[loc] = val;			// mirror to read side
-			inject_write(loc, val);		// let Core 1 dispatch see it
-			printf("%02X: %02X\n", loc, val);
-		}
-		break;
-	}
-
-	case CMD_FILL: {
-		const uint8_t val = cmd.fill.value;
-		for (uint16_t i = 0u; i < registers::register_length; i++) {
-			registers::write(i) = val;
-			reg[i] = val;
-		}
-		printf("Filled register window with %02X\n", val);
-		break;
-	}
-
-#if !USB_HOST_MODE
-	case CMD_USB: {
-		/* Send each space-separated word as a separate USB CDC write. */
-		char args[sizeof(cmd.usb.args)];
-		memcpy(args, cmd.usb.args, sizeof(args));
-		char *ptr = args;
-		char *word;
-		while ((word = strsep(&ptr, " \t")) != nullptr) {
-			if (*word == '\0')
-				continue;
-			snprintf(reinterpret_cast<char *>(buffer), sizeof(buffer), "%s\r\n", word);
-			usb_cdc_write_n(0, buffer, strlen(reinterpret_cast<char *>(buffer)));
-		}
-		usb_cdc_flush_n(0);
-		break;
-	}
-#endif /* !USB_HOST_MODE */
-
-	default:
-		break;
-	}
-}
-
-static constexpr char prompt[] = "==> ";
-static bool console_prompted = false;
-
-// One console iteration: show the prompt if needed, pump USB, handle at most
-// one input character. Non-blocking, so the caller's loop can interleave
-// other Core 0 work (power sensing in particular) between characters. The
-// console runs in standby too — it must stay alive when main power is off.
-static void
-poll_console_once()
-{
-	static char buf[COMMAND_BUFFER_LEN];
-	static int idx = 0;
-
-	if (!console_prompted) {
-		printf(prompt);
-		console_prompted = true;
-	}
-	// Poll USB before reading a character so that all chars delivered by
-	// this tud_task() call are visible to getchar_timeout_us().
-	usb_poll();
-	const int ch = getchar_timeout_us(0);
-	if (ch != PICO_ERROR_TIMEOUT) {
-		if (ch == '\r' || ch == '\n') {
-			putchar('\n');
-			buf[idx] = '\0';
-			process_command(buf);
-			idx = 0;
-			console_prompted = false;
-		} else if (ch == '\b' || ch == 0x7F) {
-			if (idx > 0) {
-				putchar('\b');
-				putchar(' ');
-				putchar('\b');
-				buf[--idx] = '\0';
-			}
-		} else if (idx < static_cast<int>(COMMAND_BUFFER_LEN) - 1 &&
-			   ch >= ' ' && ch < 0x7F) {
-			putchar(ch);
-			buf[idx++] = ch;
-		}
-	}
-}
-
-void
-init_pins_range(const uint8_t base, const uint8_t count)
-{
-	for (uint8_t i = 0; i < count; ++i)
-		gpio_init(base + i);
-}
-
-// One-off Core 1 bring-up: wire the bus + video IRQs/DMA/PIO and start the
-// video engine. Deliberately flash-resident (default placement) — it runs once
-// at startup, so keeping it out of RAM leaves that budget for the framebuffer.
-// Only the hot drain loop in main_core1() has to stay RAM-resident.
-// __noinline is load-bearing: without it the compiler could inline this back
-// into main_core1() (which is in RAM), defeating the point.
-// Bus DMA IRQs sit one priority step below the video scanline IRQ (which stays
-// at 0, the highest), so the per-scanline video handler preempts a running bus
-// handler and never misses its DMA re-arm deadline. Lower number = higher
-// priority on Cortex-M33; 0x40 keeps the bus well above the default (0x80).
-#define BUS_IRQ_PRIORITY 0x40u
-
-static void __noinline
-core1_bringup()
-{
-	printf("Core1 process starting\n");
-
-	irq_set_exclusive_handler(piodma_read.irq, dma_bus_read_irq_handler);
-	irq_set_priority(piodma_read.irq, BUS_IRQ_PRIORITY);
-	irq_set_enabled(piodma_read.irq, true);
-	dma_channel_set_irq0_enabled(piodma_read.data_channel, true);
-	dma_channel_start(piodma_read.address_channel);
-	pio_sm_put(piodma_read.pio, piodma_read.sm, registers::read_address() >> 3); // Three bits for A0-2
-	printf("Core1 read DMA chain configured\n");
-
-	irq_set_exclusive_handler(piodma_write.irq, dma_bus_write_irq_handler);
-	irq_set_priority(piodma_write.irq, BUS_IRQ_PRIORITY);
-	irq_set_enabled(piodma_write.irq, true);
-	dma_channel_set_irq1_enabled(piodma_write.data_channel, true);
-	dma_channel_start(piodma_write.address_channel);
-	pio_sm_put(piodma_write.pio, piodma_write.sm, registers::write_address() >> 3); // Three bits for A0-2
-	printf("Core1 write DMA chain configured\n");
-
-	pio_sm_set_enabled(piodma_read.pio, piodma_read.sm, true);
-	pio_sm_set_enabled(piodma_write.pio, piodma_write.sm, true);
-	printf("Core1 read pio%d/sm%d and write pio%d/sm%d started\n",
-	       PIO_NUM(piodma_read.pio), piodma_read.sm,
-	       PIO_NUM(piodma_write.pio), piodma_write.sm);
-
-	// Bring up the video engine on this core: its per-scanline DMA IRQ
-	// (DMA_IRQ_2) is serviced here, alongside the bus IRQs (DMA_IRQ_0/1).
-	video_init();
-	printf("Core1 video engine started\n");
-#ifdef VIDEO_DEMO
-	// Test-only: draw the built-in test screen once. The DMA scans it out
-	// autonomously afterwards, so we fall through to the bus loop.
-	video_demo();
-	printf("Core1 video demo drawn\n");
-#endif
-
-	// Bring the guest link up last: READY means everything above works.
-	vid_link_init();
-	printf("Core1 guest link ready (protocol version %u)\n", VID_STAT_VERSION);
-
-	printf("Core1 process started\n");
-	core1_initialised = true;
-}
-
-// Core 1 entry: one-off bring-up (in flash) then the RAM-resident drain loop.
-static void
-__no_inline_not_in_flash_func(main_core1)()
-{
-	core1_bringup();
-
-	bool reset_was_asserted = false;
-
-	for (;;) {
-		core1_loop_count++;
-
-		// Observe host !RESET. On the asserting edge, clear the register
-		// window so the peripheral presents a clean slate to the host.
-		const bool reset_now = RESET_IS_ASSERTED;
-		if (reset_now && !reset_was_asserted) {
-			registers::clear();
-			vid_link_reset();	// flush FIFOs, restage Data/Stat
-		}
-		reset_was_asserted = reset_now;
-
-		// Drain guest writes. The byte was already mirrored to the read side
-		// in the ISR; this loop is where video/keyboard/mouse register side
-		// effects will be dispatched.
-		while (write_ring_tail != write_ring_head) {
-			const uint8_t t = write_ring_tail;
-			core1_last_write_loc = write_ring[t].location;
-			write_ring_tail = (t + 1u) & WRITE_RING_MASK;
-			switch (write_ring[t].location) {
-			case VID_DATA_OFFSET:
-			case VID_STAT_OFFSET:
-				vid_link_guest_write(write_ring[t].location,
-				    write_ring[t].value);
-				break;
-			default:
-				break;
-			}
-		}
-
-		// Drain guest reads. Reserved for auto-clearing status registers.
-		if (read_irq_received) {
-			read_irq_received = false;
-			core1_last_read_loc = read_location;
-			switch (read_location) {
-			default:	// link pops happen in the read ISR itself
-				break;
-			}
-		}
-
-		// Keep the guest-visible registers current. Rendering the command
-		// stream happens on Core 0: this core carries the bus interrupts
-		// and the scanline deadline, and must stay resident and bounded.
-		vid_link_stage();
-	}
-}
-
-static void
-bus_pio_dma_init()
-{
-	// Bus pins — all inputs. E/Q are supplied by the host and sampled by the
-	// PIO programs via 'wait gpio'; they must be plain GPIO inputs (the Pico
-	// no longer generates them).
-	gpio_init(GPIO_E);
-	gpio_set_dir(GPIO_E, GPIO_IN);
-	gpio_init(GPIO_Q);
-	gpio_set_dir(GPIO_Q, GPIO_IN);
-
-	init_pins_range(GPIO_A_BASE, 3); // A0..2 inputs
-	gpio_set_dir_in_masked(0b111u << GPIO_A_BASE);
-
-	gpio_init(GPIO_RW);
-	gpio_set_dir(GPIO_RW, GPIO_IN);
-	init_pins_range(GPIO_D_BASE, 8); // D0..7 inputs initially (inputs/tri-state)
-	gpio_set_dir_in_masked(0b11111111u << GPIO_D_BASE);
-
-	gpio_init(GPIO_CS);
-	gpio_set_dir(GPIO_CS, GPIO_IN);
-
-	// DMA for the main MC6809 bus read loop
-	if (dma_channel_is_claimed(piodma_read.address_channel)) {
-		printf("Core0 DMA channel %d for bus_read address is already claimed\n",
-		       piodma_read.address_channel);
-		panic("Unable to proceed");
-	}
-	dma_channel_claim(piodma_read.address_channel);
-	if (dma_channel_is_claimed(piodma_read.data_channel)) {
-		printf("Core0 DMA channel %d for bus_read data is already claimed\n", piodma_read.data_channel);
-		panic("Unable to proceed");
-	}
-	dma_channel_claim(piodma_read.data_channel);
-
-	// SM: Bus read responder
-	// The bus pins span GPIO 23-39, so the PIO GPIO base must be 16 (window
-	// 16-47). This MUST happen before pio_add_program(): pio_set_gpio_base()
-	// refuses once a program is loaded (returns PICO_ERROR_INVALID_STATE and
-	// leaves the base at 0), and pio_add_program() relocates the wait-gpio
-	// instructions relative to the base as it loads them.
-	pio_set_gpio_base(piodma_read.pio, 16);
-	pio_read_offset = pio_add_program(piodma_read.pio, &mc6809_bus_read_program);
-	if (pio_read_offset < 0) {
-		printf("Core0 insufficient space for bus_read program\n");
-		panic("Unable to proceed");
-	}
-	piodma_read.sm = pio_claim_unused_sm(piodma_read.pio, true);
-	if (piodma_read.sm < 0) {
-		printf("Core0 unable to claim unused SM for bus_read program\n");
-		panic("Unable to proceed");
-	}
-	mc6809_bus_read_program_init(piodma_read.pio, piodma_read.sm, pio_read_offset);
-	printf("Core0 read pio%u sm%d configured\n", PIO_NUM(piodma_read.pio), piodma_read.sm);
-	// DMA move the requested memory data to PIO for output
-	dma_channel_config read_out_dma = dma_channel_get_default_config(piodma_read.data_channel);
-	channel_config_set_high_priority(&read_out_dma, true);
-	channel_config_set_dreq(&read_out_dma, pio_get_dreq(piodma_read.pio, piodma_read.sm, true));
-	channel_config_set_read_increment(&read_out_dma, false);
-	channel_config_set_write_increment(&read_out_dma, false);
-	channel_config_set_transfer_data_size(&read_out_dma, DMA_SIZE_8);
-	channel_config_set_chain_to(&read_out_dma, piodma_read.address_channel);
-	dma_channel_configure(
-		piodma_read.data_channel,
-		&read_out_dma,
-		&piodma_read.pio->txf[piodma_read.sm],	// dst
-		nullptr,				// src - will be overwritten by the below DMA
-		dma_encode_transfer_count(1),
-		false);
-	printf("Core0 DMA read_out channel configured\n");
-	// DMA move address from PIO into the data DMA config
-	dma_channel_config read_address_dma = dma_channel_get_default_config(piodma_read.address_channel);
-	channel_config_set_high_priority(&read_address_dma, true);
-	channel_config_set_dreq(&read_address_dma, pio_get_dreq(piodma_read.pio, piodma_read.sm, false));
-	channel_config_set_read_increment(&read_address_dma, false);
-	channel_config_set_write_increment(&read_address_dma, false);
-	channel_config_set_transfer_data_size(&read_address_dma, DMA_SIZE_32);
-	channel_config_set_chain_to(&read_address_dma, piodma_read.data_channel);
-	dma_channel_configure(
-		piodma_read.address_channel,
-		&read_address_dma,
-		&dma_channel_hw_addr(piodma_read.data_channel)->read_addr,	// dst
-		&piodma_read.pio->rxf[piodma_read.sm],				// src
-		dma_encode_transfer_count(1),
-		false);
-	printf("Core0 DMA read_address channel configured\n");
-
-	// SM: Bus write responder
-	// Base 16 before the program is loaded, as for the read PIO above.
-	pio_set_gpio_base(piodma_write.pio, 16);
-	pio_write_offset = pio_add_program(piodma_write.pio, &mc6809_bus_write_program);
-	if (pio_write_offset < 0) {
-		printf("Core0 insufficient space for bus_write program\n");
-		panic("Unable to proceed");
-	}
-	piodma_write.sm = pio_claim_unused_sm(piodma_write.pio, true);
-	if (piodma_write.sm < 0) {
-		printf("Core0 unable to claim unused SM for bus_write program\n");
-		panic("Unable to proceed");
-	}
-	mc6809_bus_write_program_init(piodma_write.pio, piodma_write.sm, pio_write_offset);
-	printf("Core0 write pio%u sm%d configured\n", PIO_NUM(piodma_write.pio), piodma_write.sm);
-	// DMA for the main MC6809 bus write loop
-	if (dma_channel_is_claimed(piodma_write.address_channel)) {
-		printf("Core0 DMA channel %d for bus_write address is already claimed\n",
-		       piodma_write.address_channel);
-		panic("Unable to proceed");
-	}
-	dma_channel_claim(piodma_write.address_channel);
-	if (dma_channel_is_claimed(piodma_write.data_channel)) {
-		printf("Core0 DMA channel %d for bus_write data is already claimed\n",
-		       piodma_write.data_channel);
-		panic("Unable to proceed");
-	}
-	dma_channel_claim(piodma_write.data_channel);
-	dma_channel_config write_in_dma = dma_channel_get_default_config(piodma_write.data_channel);
-	channel_config_set_high_priority(&write_in_dma, true);
-	channel_config_set_dreq(&write_in_dma, pio_get_dreq(piodma_write.pio, piodma_write.sm, false));
-	channel_config_set_read_increment(&write_in_dma, false);
-	channel_config_set_write_increment(&write_in_dma, false);
-	channel_config_set_transfer_data_size(&write_in_dma, DMA_SIZE_8);
-	channel_config_set_chain_to(&write_in_dma, piodma_write.address_channel);
-	dma_channel_configure(
-		piodma_write.data_channel,
-		&write_in_dma,
-		nullptr,					// dst - will be overwritten by the below DMA
-		&piodma_write.pio->rxf[piodma_write.sm],	// src
-		dma_encode_transfer_count(1),
-		false);
-	printf("Core0 DMA write_in channel configured\n");
-	// DMA move address from PIO into the write data DMA config
-	dma_channel_config write_address_dma = dma_channel_get_default_config(piodma_write.address_channel);
-	channel_config_set_high_priority(&write_address_dma, true);
-	channel_config_set_dreq(&write_address_dma, pio_get_dreq(piodma_write.pio, piodma_write.sm, false));
-	channel_config_set_read_increment(&write_address_dma, false);
-	channel_config_set_write_increment(&write_address_dma, false);
-	channel_config_set_transfer_data_size(&write_address_dma, DMA_SIZE_32);
-	channel_config_set_chain_to(&write_address_dma, piodma_write.data_channel);
-	dma_channel_configure(
-		piodma_write.address_channel,
-		&write_address_dma,
-		&dma_channel_hw_addr(piodma_write.data_channel)->write_addr,	// dst
-		&piodma_write.pio->rxf[piodma_write.sm],			// src
-		dma_encode_transfer_count(1),
-		false);
-	printf("Core0 DMA write_address channel configured\n");
-}
-
-#define MEASURE_FREQS
 #ifdef MEASURE_FREQS
 static void
 measure_freqs()
@@ -770,29 +87,6 @@ measure_freqs()
 // Can't measure clk_ref/xosc as it is the ref
 }
 #endif
-
-static void
-set_power()
-{
-	// !IRQ is a simulated open-collector output: latch low, then release to
-	// high impedance until a device needs to interrupt the host.
-	gpio_init(GPIO_IRQ);
-	gpio_put(GPIO_IRQ, false);
-	gpio_set_drive_strength(GPIO_IRQ, GPIO_DRIVE_STRENGTH_8MA);
-	DEASSERT_IRQ;
-
-	// !RESET is an input: the host drives it, we observe it. Pull up so a
-	// disconnected line reads released (the signal is active-low).
-	gpio_init(GPIO_RESET);
-	gpio_set_dir(GPIO_RESET, GPIO_IN);
-	// gpio_pull_up(GPIO_RESET);
-
-	bus_pio_dma_init();
-	peripheral_clear();
-	printf("Core0 register window initialised\n");
-
-	multicore_launch_core1(main_core1);
-}
 
 int
 main()
@@ -867,28 +161,28 @@ main()
 	if (!power_is_on()) {
 		printf("Core0 standby: main 5V is absent — console only\n");
 		while (!power_is_on()) {
-			poll_console_once();
+			console_poll();
 			power_task();
 		}
 		printf("\nCore0 main 5V detected\n");
-		console_prompted = false;
+		console_reprompt();
 	}
 
 	// Bring up the bus peripheral and launch Core 1 (bus engine + video).
-	set_power();
+	bus_engine_start();
 
 	printf("Core0 ready!\n");
 
 	// Wait for Core 1's main loop to be running before entering the console.
-	while (core1_loop_count < 100u) {
+	while (bus_engine_loop_count() < 100u) {
 		sleep_ms(1u);
 		usb_poll();
 	}
 
-	print_time();
+	console_print_time();
 
 	for (;;) {
-		poll_console_once();
+		console_poll();
 		power_task();
 
 		// Render the guest's command stream here, off the bus core.
