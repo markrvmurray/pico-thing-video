@@ -88,14 +88,22 @@ static volatile bool ms_held;		/* guest latched explicitly; hold it */
 static void
 __not_in_flash_func(ms_latch)(void)
 {
-	uint32_t s0;
-	int x, y;
-
-	do {
-		s0 = ms_seq;
-		x = ms_x;
-		y = ms_y;
-	} while ((s0 & 1u) != 0u || s0 != ms_seq);
+	/* ONE ATTEMPT, NEVER A RETRY LOOP. This runs on the bus core, reachable
+	 * from the read ISR, which owes the scan-out DMA a re-arm inside about
+	 * 5 us and owes the bus its next service at 6809 rates. Spinning until
+	 * the render core finishes publishing would wait not on its handful of
+	 * instructions but on whatever interrupts it midway -- USB, the ADC
+	 * pass -- which is no bound at all.
+	 *
+	 * So: read the pair, and if it was torn, KEEP THE PREVIOUS SNAPSHOT and
+	 * leave. ms_dirty stays set, so the next pass tries again and the data
+	 * is at worst one pass stale. A mouse sample a pass old is worth
+	 * incomparably more than an unbounded stall in an interrupt handler. */
+	const uint32_t s0 = ms_seq;
+	const int x = ms_x;
+	const int y = ms_y;
+	if ((s0 & 1u) != 0u || s0 != ms_seq)
+		return;			/* torn; previous snapshot stands */
 
 	ms_sticky_acc = (uint8_t)(ms_sticky_acc | ms_sticky);
 	ms_wheel_acc += ms_wheel;
