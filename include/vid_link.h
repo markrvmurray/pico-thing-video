@@ -31,6 +31,7 @@ extern "C" {
 #define VID_DATA_OFFSET   0u	/* $FF10 */
 #define VID_STAT_OFFSET   1u	/* $FF11 */
 #define VID_MOUSE_OFFSET  2u	/* $FF12 */
+#define VID_INFO_OFFSET   3u	/* $FF13 */
 
 /* VID.Stat (read) */
 #define VID_STAT_RDRF     0x01u	/* input byte available in Data */
@@ -165,6 +166,28 @@ void vid_link_mouse_read(void);
  * pass self-framing (write, then read VID_MOUSE_SNAPSHOT_LEN bytes), so a
  * guest that loses count resyncs with one write instead of a link reset. */
 void vid_link_mouse_write(void);
+
+/* ---- VID.Info ($FF13, read-only) --------------------------------------
+ *
+ * The drawing surface, so the guest need not hard-code it. Successive reads
+ * walk six bytes and the index wraps; a write of any value homes it, exactly
+ * as VID.Mouse works, so a guest frames a read the same way it already does
+ * for the mouse: write, then read.
+ *
+ * Pixels first, deliberately: graphics code reads the first four bytes and
+ * stops, text layout reads on. Big-endian, as the 6809 reads.
+ *
+ *   0-1  framebuffer width   (pixels)
+ *   2-3  framebuffer height  (pixels)
+ *   4    text columns
+ *   5    text rows
+ *
+ * A constant in the protocol would go stale the moment the panel or the
+ * scaler changed, and a request/response would need machinery the link does
+ * not have. This costs one reserved register and no round trip. */
+#define VID_INFO_LEN      6u
+void vid_link_info_read(void);
+void vid_link_info_write(void);
 
 /* Console diagnostics: current pointer state. */
 void vid_link_mouse_print(void);

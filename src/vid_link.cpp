@@ -5,6 +5,7 @@
 #include "pico/stdlib.h"
 
 #include "registers.h"
+#include "video.h"	/* FB_WIDTH/HEIGHT, TEXT_COLS/ROWS */
 #include "vid_link.h"
 
 /* Command FIFO (6809 -> us). The register contract promises TDRE set means
@@ -178,6 +179,37 @@ __not_in_flash_func(vid_link_mouse_read)(void)
 	reg[VID_MOUSE_OFFSET] = ms_snapshot[ms_index];
 }
 
+/* ---- VID.Info: the drawing surface, walked like the mouse snapshot ------ */
+static const uint8_t info_block[VID_INFO_LEN] = {
+	(uint8_t)(FB_WIDTH  >> 8), (uint8_t)FB_WIDTH,
+	(uint8_t)(FB_HEIGHT >> 8), (uint8_t)FB_HEIGHT,
+	(uint8_t)TEXT_COLS,
+	(uint8_t)TEXT_ROWS,
+};
+static uint8_t info_index;
+
+extern "C" void
+__not_in_flash_func(vid_link_info_read)(void)
+{
+	/* Bus core, from the read ISR: the byte has gone out, step on and
+	 * stage the next. Constant data, so no latching and nothing to hold
+	 * consistent -- unlike the mouse, a pass cannot tear. */
+	if (++info_index >= VID_INFO_LEN)
+		info_index = 0u;
+	reg[VID_INFO_OFFSET] = info_block[info_index];
+}
+
+extern "C" void
+__not_in_flash_func(vid_link_info_write)(void)
+{
+	/* Any value homes the index, so a pass is self-framing: write, then
+	 * read six. Handled synchronously in the write ISR for the same reason
+	 * the mouse is -- a guest may read in the very next instruction, which
+	 * would race the Core 1 drain. */
+	info_index = 0u;
+	reg[VID_INFO_OFFSET] = info_block[0];
+}
+
 extern "C" void
 __not_in_flash_func(vid_link_mouse_write)(void)
 {
@@ -315,6 +347,9 @@ vid_link_reset(void)
 	ms_latch();
 	reg[VID_MOUSE_OFFSET] = ms_snapshot[0];
 
+	info_index = 0u;
+	reg[VID_INFO_OFFSET] = info_block[0];
+
 	restage();
 }
 
@@ -349,8 +384,9 @@ __not_in_flash_func(vid_link_guest_write)(uint8_t location, uint8_t value)
 		}
 		break;
 	case VID_MOUSE_OFFSET:
+	case VID_INFO_OFFSET:
 		/* Already handled synchronously in the write ISR (see
-		 * vid_link_mouse_write); nothing to do on the drain. */
+		 * vid_link_mouse_write / _info_write); nothing to do here. */
 		break;
 	case VID_STAT_OFFSET:
 		loopback = (value & VID_CTL_LOOPBACK) != 0u;

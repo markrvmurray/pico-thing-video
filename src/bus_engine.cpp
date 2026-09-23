@@ -115,6 +115,8 @@ __time_critical_func(dma_bus_read_irq_handler())
 	vid_link_guest_read(read_location);
 	if (read_location == VID_MOUSE_OFFSET)
 		vid_link_mouse_read();
+	else if (read_location == VID_INFO_OFFSET)
+		vid_link_info_read();
 }
 
 // ISR for the R/!W bus write loop and DMA chain.
@@ -134,7 +136,7 @@ __time_critical_func(dma_bus_write_irq_handler())
 	// side is device-owned (VID.Data stages the input head byte, VID.Stat
 	// the status, VID.Mouse the pointer snapshot), and a guest write must
 	// not clobber it.
-	if (wloc > VID_MOUSE_OFFSET)
+	if (wloc > VID_INFO_OFFSET)
 		reg[wloc] = wval;
 	// Mouse re-latch/resync happens HERE rather than on the Core 1 drain:
 	// a guest may read $FF12 in the very next instruction, which would
@@ -142,6 +144,8 @@ __time_critical_func(dma_bus_write_irq_handler())
 	// in a known state.
 	if (wloc == VID_MOUSE_OFFSET)
 		vid_link_mouse_write();
+	else if (wloc == VID_INFO_OFFSET)
+		vid_link_info_write();
 	// Queue for Core 1.
 	const uint8_t h = write_ring_head;
 	const uint8_t next_h = (h + 1u) & WRITE_RING_MASK;
