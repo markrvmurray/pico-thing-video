@@ -19,6 +19,7 @@
 
 #include "hardware/dma.h"
 #include "hardware/irq.h"
+#include "hardware/clocks.h"
 #include "hardware/pio.h"
 #include "hardware/resets.h"
 
@@ -96,12 +97,44 @@ static volatile write_entry write_ring[WRITE_RING_SIZE];
 static volatile uint8_t write_ring_head = 0u;    // written by ISR
 static volatile uint8_t write_ring_tail = 0u;    // read by for(;;) loop
 
+// ── Handler cost ────────────────────────────────────────────────────────────
+// What the bus interrupt handlers actually cost, in CYCLES. Microseconds are
+// useless here: these should run in single-digit microseconds, and a timer
+// with 1 us resolution cannot see the difference between comfortable and
+// nearly-late. The Cortex-M33 cycle counter gives ~5 ns at 192 MHz.
+//
+// This exists because the margin in these handlers has been invisible. A guest
+// hang was chased for days across four wrong hypotheses, and every one of them
+// would have been settled in minutes by a number saying how long these take and
+// whether the worst case was creeping. Cheap enough to leave in: two register
+// reads per handler, which is small against what the handler does and is
+// honest about including itself.
+#define DWT_CTRL	(*(volatile uint32_t *)0xE0001000)
+#define DWT_CYCCNT	(*(volatile uint32_t *)0xE0001004)
+#define SCB_DEMCR	(*(volatile uint32_t *)0xE000EDFC)
+
+static volatile uint32_t isr_read_max;		// cycles, worst single entry
+static volatile uint32_t isr_write_max;
+static volatile uint32_t isr_read_total;	// cycles, summed
+static volatile uint32_t isr_write_total;
+static volatile uint32_t isr_read_calls;
+static volatile uint32_t isr_write_calls;
+
+static void
+cycle_counter_enable(void)
+{
+	SCB_DEMCR = SCB_DEMCR | (1u << 24);	// TRCENA
+	DWT_CYCCNT = 0u;
+	DWT_CTRL = DWT_CTRL | 1u;		// CYCCNTENA
+}
+
 // ISR for the R/!W bus read loop and DMA chain.
 // The read DMA has already handed read_registers[addr] to the host; we only
 // record which location was read for optional Core 1 side effects.
 void __isr
 __time_critical_func(dma_bus_read_irq_handler())
 {
+	const uint32_t t_in = DWT_CYCCNT;
 	dma_channel_acknowledge_irq0(piodma_read.data_channel);
 	core1_isr_count++;
 	const uintptr_t read_addr = dma_channel_hw_addr(piodma_read.data_channel)->read_addr;
@@ -117,6 +150,12 @@ __time_critical_func(dma_bus_read_irq_handler())
 		vid_link_mouse_read();
 	else if (read_location == VID_INFO_OFFSET)
 		vid_link_info_read();
+
+	const uint32_t dt = DWT_CYCCNT - t_in;
+	isr_read_total = isr_read_total + dt;
+	isr_read_calls = isr_read_calls + 1u;
+	if (dt > isr_read_max)
+		isr_read_max = dt;
 }
 
 // ISR for the R/!W bus write loop and DMA chain.
@@ -126,6 +165,7 @@ __time_critical_func(dma_bus_read_irq_handler())
 void __isr
 __time_critical_func(dma_bus_write_irq_handler())
 {
+	const uint32_t t_in = DWT_CYCCNT;
 	dma_channel_acknowledge_irq1(piodma_write.data_channel);
 	core1_isr_count++;
 	const uintptr_t written_addr = dma_channel_hw_addr(piodma_write.data_channel)->write_addr;
@@ -154,6 +194,12 @@ __time_critical_func(dma_bus_write_irq_handler())
 	write_ring[h].location = wloc;
 	write_ring[h].value = wval;
 	write_ring_head = next_h;
+
+	const uint32_t dt = DWT_CYCCNT - t_in;
+	isr_write_total = isr_write_total + dt;
+	isr_write_calls = isr_write_calls + 1u;
+	if (dt > isr_write_max)
+		isr_write_max = dt;
 }
 
 static void
@@ -343,6 +389,8 @@ bus_pio_dma_init()
 	// believes the PIO is pristine while the hardware disagrees. Resetting
 	// the blocks makes a warm boot identical to a cold one and costs
 	// microseconds, once.
+	cycle_counter_enable();
+
 	reset_unreset_block_num_wait_blocking(RESET_PIO0);
 	reset_unreset_block_num_wait_blocking(RESET_PIO1);
 
@@ -535,6 +583,19 @@ bus_engine_loop_count(void)
 void
 bus_engine_print_status(void)
 {
+	// Cycles, with microseconds alongside because the deadline that
+	// matters -- the scan-out DMA's re-arm window -- is quoted in them.
+	const uint32_t hz = clock_get_hz(clk_sys) / 1000000u;
+	const uint32_t rmax = isr_read_max, wmax = isr_write_max;
+	const uint32_t rc = isr_read_calls, wc = isr_write_calls;
+	printf("Bus ISR:     read max %lu cy (%lu.%02lu us) avg %lu"
+	       "  write max %lu cy (%lu.%02lu us) avg %lu\n",
+	       (unsigned long)rmax,
+	       (unsigned long)(rmax / hz), (unsigned long)((rmax * 100u / hz) % 100u),
+	       (unsigned long)(rc ? isr_read_total / rc : 0u),
+	       (unsigned long)wmax,
+	       (unsigned long)(wmax / hz), (unsigned long)((wmax * 100u / hz) % 100u),
+	       (unsigned long)(wc ? isr_write_total / wc : 0u));
 	printf("Core1 loop:  %lu  isr: %lu\n",
 	       (unsigned long)core1_loop_count, (unsigned long)core1_isr_count);
 	printf("Last write:  %02X  last read: %02X\n",
