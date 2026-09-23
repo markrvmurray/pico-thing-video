@@ -129,6 +129,13 @@ core0_load_print(void)
 	// one. The worst service interval says so directly, against the frame
 	// period measured over the same window rather than an assumed
 	// refresh rate.
+#if VIDEO_SCANOUT_OFF
+	// No scan-out means no frame interrupt, so every frame-derived figure
+	// below is structurally zero. Say it here, next to the zeros, rather
+	// than only at boot where it scrolls away.
+	printf("Frames:      scan-out is OFF (measurement build) — frame"
+	       " figures below are meaningless\n");
+#endif
 	const uint32_t frames = video_frames - core0_epoch_frame;
 	const uint32_t period = frames ? elapsed / frames : 0u;
 	printf("Service:     worst gap %lu us (frame %lu us)%s\n",

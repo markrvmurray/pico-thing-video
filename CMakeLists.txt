@@ -56,6 +56,17 @@ option(USB_HOST_MODE "Build USB as HID host (keyboard+mouse) instead of CDC devi
 # clock -- and the only outward sign is a line in the boot banner.
 option(FAST_SYS_CLK_320 "Run clk_sys at 320 MHz with clk_hstx on PLL_USB" ON)
 
+# MEASUREMENT BUILD ONLY -- leaves the display dark. The scan-out DMA reads the
+# framebuffer continuously at a fixed wall rate and outranks both cores on the
+# SRAM crossbar (see bus_ctrl_hw->priority in video.cpp), which is the leading
+# explanation for the fixed-time stall inside the bus ISRs: the expensive read
+# path measures 77 cycles of work plus ~172 ns that does not shrink with the
+# clock. Turning scan-out off removes that traffic, so if the stall is the DMA
+# it should collapse and the handler should cost ~77 cycles at ANY clock. That
+# turns an inference into a measurement, and it decides whether the fix is to
+# trim the handler's SRAM traffic or to move pop-on-read into the PIO.
+option(VIDEO_SCANOUT "Run the scan-out DMA (OFF = dark display, measurement only)" ON)
+
 # Flex and bison run on the BUILD HOST; the generated .c files are
 # cross-compiled for RP2350 by arm-none-eabi-gcc.
 #
@@ -147,6 +158,12 @@ if(USB_HOST_MODE)
 	target_sources(pico-thing-video PRIVATE src/usb_host.cpp src/hid_cook.cpp)
 else()
 	target_sources(pico-thing-video PRIVATE src/usb_descriptors.cpp)
+endif()
+
+if(NOT VIDEO_SCANOUT)
+	target_compile_definitions(pico-thing-video PRIVATE VIDEO_SCANOUT_OFF=1)
+	message(WARNING "VIDEO_SCANOUT=OFF: this image leaves the display DARK. "
+	                "Measurement builds only.")
 endif()
 
 if(FAST_SYS_CLK_320)

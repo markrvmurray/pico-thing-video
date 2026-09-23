@@ -272,7 +272,16 @@ static void hstx_dvi_init(void)
 
     bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
 
+#if VIDEO_SCANOUT_OFF
+    /* Measurement build: everything above is configured but never started, so
+     * not one framebuffer word is fetched. The display stays dark -- which is
+     * why this says so on the console rather than leaving a silent black
+     * screen to be diagnosed as a fault. */
+    printf("VIDEO: scan-out DMA NOT started (VIDEO_SCANOUT=OFF)."
+           " Display is dark by construction; this is a measurement build.\n");
+#else
     dma_channel_start(DMACH_PING);
+#endif
 }
 
 /* ───────────────────────── vsync presentation ───────────────────────────── */
