@@ -1,5 +1,6 @@
 /* vid_link.cpp – FreeBSD style */
 
+#include <atomic>
 #include <stdio.h>
 
 #include "pico/stdlib.h"
@@ -276,6 +277,13 @@ rx_push(uint8_t b)
 		return;
 	}
 	rx_fifo[rx_head & RX_FIFO_MASK] = b;
+	/* RELEASE. The ring slots are plain bytes and the index is volatile,
+	 * which orders the index against other volatile accesses and NOTHING
+	 * against the slot. Without this the store of the byte may be observed
+	 * after the store of the index, and the consuming core reads a slot
+	 * that still holds its PREVIOUS contents -- an older character, which
+	 * in a ring that has been in use is whatever was typed before. */
+	std::atomic_thread_fence(std::memory_order_release);
 	rx_head = rx_head + 1u;
 	stat_rx_pushed = stat_rx_pushed + 1u;
 }
@@ -292,6 +300,9 @@ __not_in_flash_func(restage)(void)
 	const bool rdrf = rx_level() > 0u;
 	if (rdrf) {
 		st |= VID_STAT_RDRF;
+		/* ACQUIRE, pairing with the release in rx_push(): having seen
+		 * the index move, make sure we also see the byte it published. */
+		std::atomic_thread_fence(std::memory_order_acquire);
 		reg[VID_DATA_OFFSET] = rx_fifo[rx_tail & RX_FIFO_MASK];
 	}
 
@@ -379,6 +390,11 @@ __not_in_flash_func(vid_link_guest_write)(uint8_t location, uint8_t value)
 		 * wrote without polling — drop, as agreed (graceful, no hang). */
 		if (tx_level() < TX_FIFO_SIZE) {
 			tx_fifo[tx_head & TX_FIFO_MASK] = value;
+			/* RELEASE, as in rx_push: the slot must be visible before
+			 * the index that advertises it. This ring carries the
+			 * guest's output, so a torn publish renders a stale
+			 * character on screen. */
+			std::atomic_thread_fence(std::memory_order_release);
 			tx_head = tx_head + 1u;
 			stat_tx_accepted = stat_tx_accepted + 1u;
 		}
@@ -438,6 +454,8 @@ vid_link_render(void)
 	if (tx_tail != tx_head && !loopback)
 		vid_link_consume_begin();
 
+	if (tx_tail != tx_head)
+		std::atomic_thread_fence(std::memory_order_acquire);
 	while (tx_tail != tx_head) {
 		const uint8_t b = tx_fifo[tx_tail & TX_FIFO_MASK];
 		tx_tail = tx_tail + 1u;
