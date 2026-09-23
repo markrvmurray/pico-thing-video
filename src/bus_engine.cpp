@@ -20,6 +20,7 @@
 #include "hardware/dma.h"
 #include "hardware/irq.h"
 #include "hardware/pio.h"
+#include "hardware/resets.h"
 
 #include "bus_engine.h"
 #include "pico_thing_video.h"
@@ -328,11 +329,31 @@ bus_pio_dma_init()
 
 	// SM: Bus read responder
 	// The bus pins span GPIO 23-39, so the PIO GPIO base must be 16 (window
+	// HARD-RESET BOTH BUS PIOs FIRST, so bring-up does not depend on what
+	// was left behind. A warm reset over SWD -- which is how this board is
+	// flashed, many times a day -- does not necessarily return every
+	// peripheral to its power-on state, and PIO carries exactly the kind
+	// of state that matters here: loaded instruction memory, a GPIO base,
+	// running state machines. The SDK's own bookkeeping lives in RAM and
+	// IS reinitialised at boot, so after a warm reset the software
+	// believes the PIO is pristine while the hardware disagrees. Resetting
+	// the blocks makes a warm boot identical to a cold one and costs
+	// microseconds, once.
+	reset_unreset_block_num_wait_blocking(RESET_PIO0);
+	reset_unreset_block_num_wait_blocking(RESET_PIO1);
+
 	// 16-47). This MUST happen before pio_add_program(): pio_set_gpio_base()
 	// refuses once a program is loaded (returns PICO_ERROR_INVALID_STATE and
 	// leaves the base at 0), and pio_add_program() relocates the wait-gpio
 	// instructions relative to the base as it loads them.
-	pio_set_gpio_base(piodma_read.pio, 16);
+	if (pio_set_gpio_base(piodma_read.pio, 16) != PICO_OK) {
+		// Silent and fatal if unchecked: the base stays at 0, every bus
+		// pin shifts down by 16, and the state machine simply never
+		// sees the bus. Nothing else reports it -- it took a debugger
+		// to find last time.
+		printf("Core0 read PIO refused GPIO base 16\n");
+		panic("Unable to proceed");
+	}
 	pio_read_offset = pio_add_program(piodma_read.pio, &mc6809_bus_read_program);
 	if (pio_read_offset < 0) {
 		printf("Core0 insufficient space for bus_read program\n");
@@ -380,7 +401,10 @@ bus_pio_dma_init()
 
 	// SM: Bus write responder
 	// Base 16 before the program is loaded, as for the read PIO above.
-	pio_set_gpio_base(piodma_write.pio, 16);
+	if (pio_set_gpio_base(piodma_write.pio, 16) != PICO_OK) {
+		printf("Core0 write PIO refused GPIO base 16\n");
+		panic("Unable to proceed");
+	}
 	pio_write_offset = pio_add_program(piodma_write.pio, &mc6809_bus_write_program);
 	if (pio_write_offset < 0) {
 		printf("Core0 insufficient space for bus_write program\n");
