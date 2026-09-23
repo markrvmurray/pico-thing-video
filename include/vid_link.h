@@ -51,6 +51,20 @@ extern "C" {
 				 * as version 7 here and $00 as version 0;
 				 * neither matches, so one mask and one compare
 				 * make the guest immune to our absence. */
+/* DO NOT BUMP THIS UNILATERALLY.
+ *
+ * The guest checks it STRICTLY: NitrOS-9's vcon rejects the device unless this
+ * field reads exactly 1, deliberately, because the field doubles as the
+ * liveness check above and a thing that gates liveness must fail CLOSED. A
+ * protocol change the driver has not been told about should stop it, not be
+ * silently tolerated.
+ *
+ * The consequence is real coupling: raising this number disables the guest's
+ * console until the NitrOS-9 side raises its own constant to match. That is
+ * the intended behaviour, and it only works if the change is agreed first.
+ * Committed 2026-09-23: this version changes by agreement with the NitrOS-9
+ * side, reviewed before any firmware ships, the way the mouse protocol was
+ * designed -- not as a side effect of some other work. */
 #define VID_STAT_VERSION  1u
 #define VID_STAT_IRQ      0x80u	/* this device is asserting !IRQ (MC6850
 				 * puts its IRQ flag in bit 7 too, and drives
