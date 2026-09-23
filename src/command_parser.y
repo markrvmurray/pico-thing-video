@@ -97,6 +97,7 @@ static int      _byte_count;
 %token TOK_I2C
 %token TOK_POWER
 %token TOK_VERBOSE
+%token TOK_FLOOD
 %token TOK_STATUS
 %token TOK_EXAMINE
 %token TOK_MODIFY
@@ -122,6 +123,7 @@ command:
 	| i2c_cmd
 	| power_cmd
 	| verbose_cmd
+	| flood_cmd
 	| status_cmd
 	| examine_cmd
 	| modify_cmd
@@ -147,6 +149,10 @@ i2c_cmd:
 
 verbose_cmd:
 	TOK_VERBOSE { result->tag = CMD_VERBOSE; }
+	;
+
+flood_cmd:
+	TOK_FLOOD { result->tag = CMD_FLOOD; }
 	;
 
 /* -----------------------------------------------------------------------

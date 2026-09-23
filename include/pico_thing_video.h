@@ -9,6 +9,11 @@
 #define DEVICE_VERSION "v0.1.0"
 
 extern volatile bool verbose;
+/* Measurement hook: while set, Core 0 keeps the link's input FIFO topped up
+ * through the ordinary keyboard producer, so guest Data reads take the
+ * pop-and-restage path instead of finding the FIFO empty. Off by default;
+ * see the CMD_FLOOD dispatch for why it cannot be done from the guest. */
+extern volatile bool input_flood;
 
 #include <cstdint>
 #include <cstdio>

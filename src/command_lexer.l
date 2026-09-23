@@ -78,6 +78,7 @@ match_command_keyword(const char *text)
 		{ "i2c",     "ic", TOK_I2C     },
 		{ "power",   "pw", TOK_POWER   },
 		{ "verbose", "vb", TOK_VERBOSE },
+		{ "flood",   "fl", TOK_FLOOD   },
 		{ "status",  "st", TOK_STATUS  },
 		{ "examine", "ex", TOK_EXAMINE },
 		{ "modify",  "mo", TOK_MODIFY  },

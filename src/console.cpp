@@ -42,6 +42,7 @@ extern void            cmd_yy_reset_str_pool(void);
 #define COMMAND_BUFFER_LEN 256u
 
 volatile bool verbose = false;
+volatile bool input_flood = false;
 
 
 #define ANSI_CLEAR_SCREEN "\033[2J"
@@ -140,6 +141,21 @@ process_command(char *buf)
 
 	switch (cmd.tag) {
 
+	case CMD_FLOOD:
+		/* A measurement hook, not a feature. Expensive Data reads need
+		 * the input FIFO non-empty, and loopback is the only guest-
+		 * reachable way to fill it -- but loopback diverts the command
+		 * stream away from the console, so the renderer draws nothing
+		 * and the two conditions we most want together are mutually
+		 * exclusive from the guest side. Feeding the FIFO from here
+		 * uses the ordinary keyboard producer, so the guest can write
+		 * a rendering command stream and still find a byte waiting on
+		 * every read. It is what a very fast typist would do. */
+		input_flood = !input_flood;
+		printf("Input flood %s%s\n", input_flood ? "on" : "off",
+		       input_flood ? " — guest reads now take the pop path" : "");
+		break;
+
 	case CMD_VERBOSE:
 		verbose = !verbose;
 #if USB_HOST_MODE
@@ -193,6 +209,7 @@ status_done:
 		"  usb <args>         (ub)  send words to the USB CDC guest console\n"
 #endif
 		"  verbose            (vb)  echo HID keys and clicks to this console\n"
+		"  flood              (fl)  feed the input FIFO continuously (measurement)\n"
 		"  help               (h)   this text\n"
 		"\nThe peripheral follows the main 5V rail: bus and video serve only\n"
 		"while it is up; on power loss the firmware restarts into standby\n"

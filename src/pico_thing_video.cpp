@@ -283,6 +283,14 @@ main()
 		console_poll();
 		power_task();
 
+		// Keep the input FIFO fed when measuring. Bounded per pass so
+		// this cannot starve the rest of the loop, and it uses the
+		// same producer the USB keyboard does, so it exercises the
+		// real path rather than a special case.
+		if (input_flood)
+			for (int i = 0; i < 8; i++)
+				vid_link_input((uint8_t)'.');
+
 		// Render the guest's command stream here, off the bus core.
 		{
 			const uint32_t t0 = time_us_32();

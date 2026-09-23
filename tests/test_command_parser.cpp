@@ -41,6 +41,7 @@ run(const std::string &line)
 TEST_CASE("no-argument commands map to their tags", "[parser]")
 {
 	CHECK(run("verbose").cmd.tag == CMD_VERBOSE);
+	CHECK(run("flood").cmd.tag   == CMD_FLOOD);
 	CHECK(run("status").cmd.tag  == CMD_STATUS);
 	CHECK(run("examine").cmd.tag == CMD_EXAMINE);
 
@@ -51,6 +52,10 @@ TEST_CASE("no-argument commands map to their tags", "[parser]")
 TEST_CASE("two-letter aliases resolve to the same tags", "[parser]")
 {
 	CHECK(run("vb").cmd.tag     == CMD_VERBOSE);
+	/* "fl" must not collide with "fi" (fill): both are f-words and the
+	 * lexer sees hex digits before keywords. */
+	CHECK(run("fl").cmd.tag     == CMD_FLOOD);
+	CHECK(run("fi").cmd.tag     == CMD_FILL);
 	CHECK(run("st").cmd.tag     == CMD_STATUS);
 	CHECK(run("ex").cmd.tag     == CMD_EXAMINE);
 	CHECK(run("mo 0 1").cmd.tag == CMD_MODIFY);
@@ -63,6 +68,7 @@ TEST_CASE("keywords are case-insensitive", "[parser]")
 	CHECK(run("STATUS").cmd.tag  == CMD_STATUS);
 	CHECK(run("Status").cmd.tag  == CMD_STATUS);
 	CHECK(run("Verbose").cmd.tag == CMD_VERBOSE);
+	CHECK(run("FLOOD").cmd.tag   == CMD_FLOOD);
 	CHECK(run("EXAMINE").cmd.tag == CMD_EXAMINE);
 }
 
