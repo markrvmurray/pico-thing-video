@@ -32,15 +32,29 @@ include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 # pins it OFF).
 option(USB_HOST_MODE "Build USB as HID host (keyboard+mouse) instead of CDC device" ON)
 
-# Run clk_sys at 320 MHz for Core 0 rendering headroom, with clk_hstx decoupled
-# onto PLL_USB so the DVI pixel clock stays at 38.4 MHz, and the core voltage
-# raised to 1.30 V. A BUILD OPTION rather than a source #define so a 320 MHz
-# image is a configuration rather than an edit: the two can coexist in separate
-# trees, and an .elf cannot silently become the other one on a later rebuild.
-# Default OFF -- bench-unvalidated on this board (320 MHz at 1.30 V is proven
-# on the main pico, but it drives no display, so the decoupled HSTX clock and
-# the thermals of continuous scan-out are untested).
-option(FAST_SYS_CLK_320 "Run clk_sys at 320 MHz with clk_hstx on PLL_USB" OFF)
+# Run clk_sys at 320 MHz, with clk_hstx decoupled onto PLL_USB so the DVI pixel
+# clock stays at 38.4 MHz, and the core voltage raised to 1.30 V. A BUILD OPTION
+# rather than a source #define so the clock is a configuration rather than an
+# edit: both can coexist in separate trees, and an .elf cannot silently become
+# the other on a later rebuild.
+#
+# DEFAULT ON since 2026-09-23, on measurement rather than preference. Against
+# 192 MHz on the same source: the bus read handler's worst case falls from
+# 277 cycles (1.44 us) to 114 (0.35 us), and the worst render burst from 28.1 ms
+# to 9.2 ms. The safety argument is the deciding one -- at 192 MHz that worst
+# case is 144% of a 1 MHz 6809 bus cycle, longer than the interval in which a
+# second access can arrive, which is exactly when pop-on-read serves a stale
+# byte; at 320 MHz it is 35%.
+#
+# Costs: 1.30 V core (up from 1.10) and roughly 4-7 C on the die depending on
+# load. Configure with -DFAST_SYS_CLK_320=OFF for a 192 MHz image; build-192/
+# is kept as that comparison tree.
+#
+# NOTE, as for USB_HOST_MODE: changing this default does NOT override an
+# existing cache entry. After flipping it, purge stale values with
+# "cmake -U FAST_SYS_CLK_320 -B <tree>" or the tree silently keeps the old
+# clock -- and the only outward sign is a line in the boot banner.
+option(FAST_SYS_CLK_320 "Run clk_sys at 320 MHz with clk_hstx on PLL_USB" ON)
 
 # Flex and bison run on the BUILD HOST; the generated .c files are
 # cross-compiled for RP2350 by arm-none-eabi-gcc.
