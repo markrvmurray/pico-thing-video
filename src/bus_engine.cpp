@@ -342,6 +342,17 @@ bus_pio_dma_init()
 	reset_unreset_block_num_wait_blocking(RESET_PIO0);
 	reset_unreset_block_num_wait_blocking(RESET_PIO1);
 
+	// DMA too, and for a nastier reason. The scan-out ping-pong pair runs
+	// for ever by design, chained to each other; a warm reset does not stop
+	// them, so they carry on reading the framebuffer into a machine that
+	// thinks it has just booted. Worse, dma_claim_unused_channel() consults
+	// a bitmap in RAM that HAS been reinitialised, so it will happily hand
+	// video back the very channels still transferring, which then get
+	// reconfigured mid-flight. Nothing before this point uses DMA -- not
+	// the USB stack, not stdio -- so this is the right place to insist on a
+	// known state.
+	reset_unreset_block_num_wait_blocking(RESET_DMA);
+
 	// 16-47). This MUST happen before pio_add_program(): pio_set_gpio_base()
 	// refuses once a program is loaded (returns PICO_ERROR_INVALID_STATE and
 	// leaves the base at 0), and pio_add_program() relocates the wait-gpio
