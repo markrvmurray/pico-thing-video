@@ -33,7 +33,6 @@
 #include <cstdio>
 #include <ctime>
 
-#include "pico/aon_timer.h"
 #include "pico/stdlib.h"
 
 #include "hardware/clocks.h"
@@ -42,7 +41,6 @@
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
 
-#include "build_time.h"
 #include "bus_engine.h"
 #include "chip_stepping.h"
 #include "console.h"
@@ -244,10 +242,6 @@ main()
 	usb_init();
 	printf("Core0 initialised USB\n");
 
-	tm tm = build_time_tm();
-	aon_timer_stop();
-	aon_timer_start_calendar(&tm);
-
 	// Follow the host system's main 5V rail (ADC6, divide-by-2): the bus and
 	// video interfaces serve only while it is up. Unlike the main pico there
 	// is no power *control* here — the peripheral simply comes alive with
@@ -275,7 +269,6 @@ main()
 		usb_poll();
 	}
 
-	console_print_time();
 
 	// Start the frame accounting from where the display actually is. Core 1
 	// brought the video engine up and has been drawing since before this

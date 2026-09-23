@@ -17,7 +17,6 @@
 #include <ctime>
 
 #include "hardware/clocks.h"
-#include "pico/aon_timer.h"
 #include "pico/stdlib.h"
 
 #include "bus_engine.h"
@@ -44,21 +43,6 @@ extern void            cmd_yy_reset_str_pool(void);
 
 volatile bool verbose = false;
 
-void
-console_print_time(void)
-{
-	tm tm{};
-	if (aon_timer_get_time_calendar(&tm)) // gives POSIX timespec
-		printf("%04d-%02d-%02d %02d:%02d:%02d UTC\n",
-		       tm.tm_year + 1900,
-		       tm.tm_mon + 1,
-		       tm.tm_mday,
-		       tm.tm_hour,
-		       tm.tm_min,
-		       tm.tm_sec);
-	else
-		printf("Unable to get calendar time\n");
-}
 
 #define ANSI_CLEAR_SCREEN "\033[2J"
 #define ANSI_CURSOR_HOME   "\033[H"
@@ -205,7 +189,6 @@ status_done:
 		"                           until a key is pressed\n"
 		"  power              (pw)  show the sensed main 5V rail\n"
 		"  i2c                (ic)  report HPD and scan the HDMI DDC bus\n"
-		"  time [y m d h m s] (ti)  show or set the clock (decimal)\n"
 #if !USB_HOST_MODE
 		"  usb <args>         (ub)  send words to the USB CDC guest console\n"
 #endif
@@ -223,24 +206,6 @@ status_done:
 	case CMD_I2C_SCAN:
 		i2c_scan();
 		break;
-
-	case CMD_TIME_QUERY:
-		console_print_time();
-		break;
-
-	case CMD_TIME_SET: {
-		tm tm = {};
-		tm.tm_mday  = 1;
-		tm.tm_year  = cmd.time.year - 1900;
-		if (cmd.time.count >= 2) tm.tm_mon  = cmd.time.month; /* already 0-based from grammar */
-		if (cmd.time.count >= 3) tm.tm_mday = cmd.time.day;
-		if (cmd.time.count >= 4) tm.tm_hour = cmd.time.hour;
-		if (cmd.time.count >= 5) tm.tm_min  = cmd.time.minute;
-		if (cmd.time.count >= 6) tm.tm_sec  = cmd.time.second;
-		aon_timer_set_time_calendar(&tm);
-		console_print_time();
-		break;
-	}
 
 	case CMD_EXAMINE:
 		registers::dump();

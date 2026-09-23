@@ -166,7 +166,6 @@ target_compile_definitions(pico-thing-video PRIVATE
 target_link_libraries(pico-thing-video
 	pico_stdlib
 	pico_multicore
-	pico_aon_timer
 	pico_unique_id
 	hardware_adc
 	hardware_dma

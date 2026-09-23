@@ -20,9 +20,6 @@ void console_poll(void);
 /* Reprint the prompt, after something else has written to the console. */
 void console_reprompt(void);
 
-/* Print the aon-timer calendar time; boot announces it once. */
-void console_print_time(void);
-
 #ifdef __cplusplus
 }
 #endif

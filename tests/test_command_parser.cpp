@@ -66,6 +66,19 @@ TEST_CASE("keywords are case-insensitive", "[parser]")
 	CHECK(run("EXAMINE").cmd.tag == CMD_EXAMINE);
 }
 
+TEST_CASE("time is no longer a command", "[parser]")
+{
+	// The video device has no timekeeping: there is nothing on this board
+	// that needs a wall clock, and the aon-timer cost a peripheral and a
+	// seeded date at every boot to answer a question nobody asked. Removed
+	// 2026-09-23. Asserted here because the command set is what these
+	// tests gate -- the previous entry for "power" sat wrong for months
+	// because nothing checked it.
+	CHECK_FALSE(run("time").ok);
+	CHECK_FALSE(run("ti").ok);
+	CHECK_FALSE(run("time 2026 9 23").ok);
+}
+
 TEST_CASE("power reports, and takes no arguments", "[parser]")
 {
 	// "power" was removed with the rest of the supervisor role during the

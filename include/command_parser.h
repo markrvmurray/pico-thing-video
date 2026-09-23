@@ -22,8 +22,6 @@ typedef enum cmd_tag {
 	CMD_STATUS,
 	CMD_POWER,
 	CMD_I2C_SCAN,
-	CMD_TIME_QUERY,
-	CMD_TIME_SET,
 
 	CMD_EXAMINE,
 	CMD_MODIFY,
@@ -39,17 +37,6 @@ typedef struct parsed_cmd {
 		struct {
 			uint32_t period; /* repeat period in ms; 0 = once */
 		} status;
-
-		/* CMD_TIME_SET */
-		struct {
-			int year;   /* full year, e.g. 2026 */
-			int month;  /* 0-based, ready for tm_mon */
-			int day;    /* 1-based */
-			int hour;
-			int minute;
-			int second;
-			int count;  /* how many fields were given (1..6) */
-		} time;
 
 		/* CMD_MODIFY */
 		struct {
