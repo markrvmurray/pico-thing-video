@@ -36,7 +36,21 @@ extern "C" {
 #define VID_STAT_RDRF     0x01u	/* input byte available in Data */
 #define VID_STAT_TDRE     0x02u	/* space free: next Data write is accepted */
 #define VID_STAT_READY    0x04u	/* firmware alive and initialised */
-#define VID_STAT_VER_LSB  3u	/* bits 5-3: protocol version */
+#define VID_STAT_VER_LSB  3u	/* bits 5-3: protocol version -- AND THE
+				 * LIVENESS CHECK. A guest must verify this
+				 * field before believing anything else in the
+				 * byte, because an absent device is not a
+				 * quiet one: while this peripheral is reset,
+				 * reflashed or unpowered it does not drive the
+				 * bus at all, and the 6809 reads whatever the
+				 * hardware gives it. With pull-ups that is
+				 * $FF, which presents as RDRF set, TDRE set
+				 * and READY set -- "a byte is waiting" -- and
+				 * a guest that trusts it will ring phantom
+				 * input for as long as we are away. $FF reads
+				 * as version 7 here and $00 as version 0;
+				 * neither matches, so one mask and one compare
+				 * make the guest immune to our absence. */
 #define VID_STAT_VERSION  1u
 #define VID_STAT_IRQ      0x80u	/* this device is asserting !IRQ (MC6850
 				 * puts its IRQ flag in bit 7 too, and drives
