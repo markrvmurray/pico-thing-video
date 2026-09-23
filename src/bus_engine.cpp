@@ -109,6 +109,7 @@ static volatile uint8_t write_ring_tail = 0u;    // read by for(;;) loop
 // whether the worst case was creeping. Cheap enough to leave in: two register
 // reads per handler, which is small against what the handler does and is
 // honest about including itself.
+#define DWT_LAR		(*(volatile uint32_t *)0xE0001FB0)
 #define DWT_CTRL	(*(volatile uint32_t *)0xE0001000)
 #define DWT_CYCCNT	(*(volatile uint32_t *)0xE0001004)
 #define SCB_DEMCR	(*(volatile uint32_t *)0xE000EDFC)
@@ -120,10 +121,16 @@ static volatile uint32_t isr_write_total;
 static volatile uint32_t isr_read_calls;
 static volatile uint32_t isr_write_calls;
 
+// MUST BE CALLED ON THE CORE BEING MEASURED. The DWT is a per-core debug
+// component on the Cortex-M33: enabling it on core 0 leaves core 1's counter
+// stopped, and the handlers then time themselves as taking zero cycles --
+// which is exactly how this first shipped, and reads as "instrumentation
+// working, margin enormous" rather than as a fault.
 static void
 cycle_counter_enable(void)
 {
 	SCB_DEMCR = SCB_DEMCR | (1u << 24);	// TRCENA
+	DWT_LAR = 0xC5ACCE55u;			// unlock, where the lock exists
 	DWT_CYCCNT = 0u;
 	DWT_CTRL = DWT_CTRL | 1u;		// CYCCNTENA
 }
@@ -245,6 +252,10 @@ static void __noinline
 core1_bringup()
 {
 	printf("Core1 process starting\n");
+
+	// On this core, because that is where the bus handlers run and the
+	// counter is per-core.
+	cycle_counter_enable();
 
 	irq_set_exclusive_handler(piodma_read.irq, dma_bus_read_irq_handler);
 	irq_set_priority(piodma_read.irq, BUS_IRQ_PRIORITY);
@@ -389,8 +400,6 @@ bus_pio_dma_init()
 	// believes the PIO is pristine while the hardware disagrees. Resetting
 	// the blocks makes a warm boot identical to a cold one and costs
 	// microseconds, once.
-	cycle_counter_enable();
-
 	reset_unreset_block_num_wait_blocking(RESET_PIO0);
 	reset_unreset_block_num_wait_blocking(RESET_PIO1);
 
