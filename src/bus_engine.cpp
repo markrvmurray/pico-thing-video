@@ -121,6 +121,21 @@ static volatile uint32_t isr_write_total;
 static volatile uint32_t isr_read_calls;
 static volatile uint32_t isr_write_calls;
 
+// A MAXIMUM IS MONOTONIC IN SAMPLE COUNT: it latches the worst value since
+// boot, so a longer run can only ever report a bigger one, and two runs of
+// different length cannot be compared by it at all. That flaw produced a
+// threefold overstatement of one clock against another before it was noticed.
+//
+// So count the TAIL as well: how many handler entries exceeded a fixed wall-
+// clock threshold, against how many there were. A rate is comparable across
+// runs of any length and across clock speeds, which the maximum is not. The
+// threshold is held in cycles and computed once from clk_sys, so the ISR does
+// no arithmetic beyond a compare.
+#define ISR_TAIL_NS	500u		// half a microsecond
+static uint32_t isr_tail_cy;		// ISR_TAIL_NS converted, set at enable
+static volatile uint32_t isr_read_over;
+static volatile uint32_t isr_write_over;
+
 // MUST BE CALLED ON THE CORE BEING MEASURED. The DWT is a per-core debug
 // component on the Cortex-M33: enabling it on core 0 leaves core 1's counter
 // stopped, and the handlers then time themselves as taking zero cycles --
@@ -133,6 +148,11 @@ cycle_counter_enable(void)
 	DWT_LAR = 0xC5ACCE55u;			// unlock, where the lock exists
 	DWT_CYCCNT = 0u;
 	DWT_CTRL = DWT_CTRL | 1u;		// CYCCNTENA
+
+	// Fixed WALL-CLOCK threshold, so the tail rate means the same thing at
+	// 192 MHz and at 320. Computed once; the handlers only compare.
+	isr_tail_cy = (uint32_t)(((uint64_t)clock_get_hz(clk_sys) *
+	    ISR_TAIL_NS) / 1000000000u);
 }
 
 // ISR for the R/!W bus read loop and DMA chain.
@@ -163,6 +183,8 @@ __time_critical_func(dma_bus_read_irq_handler())
 	isr_read_calls = isr_read_calls + 1u;
 	if (dt > isr_read_max)
 		isr_read_max = dt;
+	if (dt > isr_tail_cy)
+		isr_read_over = isr_read_over + 1u;
 }
 
 // ISR for the R/!W bus write loop and DMA chain.
@@ -207,6 +229,8 @@ __time_critical_func(dma_bus_write_irq_handler())
 	isr_write_calls = isr_write_calls + 1u;
 	if (dt > isr_write_max)
 		isr_write_max = dt;
+	if (dt > isr_tail_cy)
+		isr_write_over = isr_write_over + 1u;
 }
 
 static void
@@ -595,18 +619,28 @@ bus_engine_print_status(void)
 	// Cycles, with microseconds alongside because the deadline that
 	// matters -- the scan-out DMA's re-arm window -- is quoted in them.
 	const uint32_t hz = clock_get_hz(clk_sys) / 1000000u;
-	const uint32_t rmax = isr_read_max, wmax = isr_write_max;
-	const uint32_t rc = isr_read_calls, wc = isr_write_calls;
-	printf("Bus ISR:     read max %lu cy (%lu.%02lu us) avg %lu"
-	       "  write max %lu cy (%lu.%02lu us) avg %lu\n",
-	       (unsigned long)rmax,
-	       (unsigned long)(rmax / hz), (unsigned long)((rmax * 100u / hz) % 100u),
-	       (unsigned long)(rc ? isr_read_total / rc : 0u),
-	       (unsigned long)wmax,
-	       (unsigned long)(wmax / hz), (unsigned long)((wmax * 100u / hz) % 100u),
-	       (unsigned long)(wc ? isr_write_total / wc : 0u));
-	printf("Core1 loop:  %lu  isr: %lu\n",
-	       (unsigned long)core1_loop_count, (unsigned long)core1_isr_count);
+	// Two lines, and read the RATE not the maximum when comparing runs:
+	// the maximum latches since boot and can only grow, so it flatters a
+	// short run against a long one.
+	struct { const char *what; uint32_t mx, tot, over, sum; } isr[2] = {
+		{ "read ", isr_read_max,  isr_read_calls,  isr_read_over,  isr_read_total  },
+		{ "write", isr_write_max, isr_write_calls, isr_write_over, isr_write_total },
+	};
+	for (int i = 0; i < 2; i++) {
+		const uint32_t n = isr[i].tot;
+		const uint32_t ppm = n ? (uint32_t)(((uint64_t)isr[i].over *
+		    1000000u) / n) : 0u;
+		printf("Bus ISR %s: max %lu cy (%lu.%02lu us)  avg %lu cy  "
+		       "over %uns: %lu/%lu (%lu ppm)\n",
+		       isr[i].what,
+		       (unsigned long)isr[i].mx,
+		       (unsigned long)(isr[i].mx / hz),
+		       (unsigned long)((isr[i].mx * 100u / hz) % 100u),
+		       (unsigned long)(n ? isr[i].sum / n : 0u),
+		       ISR_TAIL_NS,
+		       (unsigned long)isr[i].over, (unsigned long)n,
+		       (unsigned long)ppm);
+	}
 	printf("Last write:  %02X  last read: %02X\n",
 	       core1_last_write_loc, core1_last_read_loc);
 	printf("Guest reads: FF10=%lu FF11=%lu (others %lu)\n",
