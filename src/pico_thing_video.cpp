@@ -95,6 +95,9 @@ static uint32_t render_max_us;		// worst single call
 static uint64_t cursor_us;		// total inside the overlay service
 static uint32_t frames_missed;		// frames that went by unserviced
 static uint32_t frames_missed_burst;	// most missed between two services
+static uint32_t core0_epoch_frame;	/* video_frames at loop entry */
+static uint32_t service_last_us;	/* when the overlay service last ran */
+static uint32_t service_max_us;		/* worst interval between two services */
 
 void
 core0_load_print(void)
@@ -119,6 +122,18 @@ core0_load_print(void)
 	       (unsigned long)video_frames,
 	       (unsigned long)frames_missed,
 	       (unsigned long)frames_missed_burst);
+	// The miss count alone has a DEAD ZONE: it counts whole frames
+	// skipped, so a pass taking between one and two frame times advances
+	// the frame counter by exactly one and records nothing. A renderer
+	// overrunning a frame by 8% is indistinguishable there from an idle
+	// one. The worst service interval says so directly, against the frame
+	// period measured over the same window rather than an assumed
+	// refresh rate.
+	const uint32_t frames = video_frames - core0_epoch_frame;
+	const uint32_t period = frames ? elapsed / frames : 0u;
+	printf("Service:     worst gap %lu us (frame %lu us)%s\n",
+	       (unsigned long)service_max_us, (unsigned long)period,
+	       (period && service_max_us > period) ? "  LATE" : "");
 }
 
 
@@ -276,7 +291,9 @@ main()
 	// time it did not have, and shows up as a large "worst run" that never
 	// happened.
 	core0_serviced_frame = video_frames;
+	core0_epoch_frame = video_frames;
 	core0_epoch_us = time_us_32();
+	service_last_us = core0_epoch_us;
 	for (;;) {
 		core0_loops = core0_loops + 1u;
 
@@ -320,6 +337,13 @@ main()
 				core0_serviced_frame = f;
 
 				const uint32_t t0 = time_us_32();
+				// How long this core actually took to come
+				// back round, which is the figure the skip
+				// count cannot express below two frames.
+				const uint32_t gap = t0 - service_last_us;
+				service_last_us = t0;
+				if (gap > service_max_us)
+					service_max_us = gap;
 				vidterm_cursor_service();
 				cursor_us += time_us_32() - t0;
 			}
