@@ -253,6 +253,7 @@ static volatile uint32_t stat_tx_consumed;	/* bytes eaten by the consumer */
 static volatile uint32_t stat_rx_pushed;	/* bytes accepted into the input FIFO */
 static volatile uint32_t stat_rx_popped;	/* Data reads that dequeued */
 static volatile uint32_t stat_rx_overruns;	/* loopback pushes dropped */
+static volatile uint32_t stat_tx_capped;	/* drains that hit the bound */
 static volatile uint8_t  stat_last_byte;
 
 extern registers &reg;
@@ -440,8 +441,11 @@ __not_in_flash_func(vid_link_stage)(void)
 extern "C" void
 vid_link_render(void)
 {
-	/* Render core. Takes as long as it takes; the guest is flow-controlled
-	 * by TDRE and the bus core keeps the registers current meanwhile. */
+	/* Render core. Bounded per call (VID_LINK_DRAIN_MAX) because this runs
+	 * on the core that owes the overlay service a frame; the rest drains on
+	 * the next pass. If the guest outruns that, the FIFO backs up and TDRE
+	 * flow-controls it, and the bus core keeps the registers current
+	 * meanwhile. */
 	if (consume_reset_pending) {
 		consume_reset_pending = false;
 		vid_link_consume_reset();
@@ -456,7 +460,9 @@ vid_link_render(void)
 
 	if (tx_tail != tx_head)
 		std::atomic_thread_fence(std::memory_order_acquire);
-	while (tx_tail != tx_head) {
+	unsigned budget = VID_LINK_DRAIN_MAX;
+	while (tx_tail != tx_head && budget > 0u) {
+		budget = budget - 1u;
 		const uint8_t b = tx_fifo[tx_tail & TX_FIFO_MASK];
 		tx_tail = tx_tail + 1u;
 		stat_tx_consumed = stat_tx_consumed + 1u;
@@ -468,6 +474,12 @@ vid_link_render(void)
 			consumed = true;
 		}
 	}
+	/* Whether the bound actually binds is the thing worth knowing: zero
+	 * here means it never limited anything and costs nothing, while a
+	 * climbing count means the guest is being flow-controlled and the
+	 * bound wants revisiting against the service interval. */
+	if (budget == 0u && tx_tail != tx_head)
+		stat_tx_capped = stat_tx_capped + 1u;
 	if (consumed)
 		vid_link_consume_flush();
 }
@@ -481,6 +493,8 @@ vid_link_print_status(void)
 	       (unsigned)VID_STAT_VERSION,
 	       (unsigned long)stat_tx_accepted, (unsigned long)stat_tx_consumed,
 	       stat_last_byte);
+	printf("             pending %u, drain capped %lu\n",
+	       (unsigned)tx_level(), (unsigned long)stat_tx_capped);
 	printf("Input:       recv %lu pop %lu pending %u ovr %lu; RDRF %s\n",
 	       (unsigned long)stat_rx_pushed, (unsigned long)stat_rx_popped,
 	       (unsigned)rx_level(),

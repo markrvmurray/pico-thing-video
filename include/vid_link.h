@@ -115,6 +115,31 @@ void vid_link_guest_read(uint8_t location);
  * keystrokes). A reset therefore clears each ring from the side that owns
  * its index, and hands the renderer's own re-arming to the render core. */
 void vid_link_stage(void);
+
+/* Bytes vid_link_render() will consume in ONE call. The drain used to run
+ * until the FIFO was empty, so a single call could work through a full 2 KB
+ * backlog: measured at 18 ms under a saturated console, against a 16.7 ms
+ * frame. The overlay service is frame-gated and sits after the render call in
+ * the same loop pass, so an overrunning drain delays the cursor by exactly
+ * that much -- and the display does not wait.
+ *
+ * Chosen against the frame budget rather than picked round. The saturated
+ * console measured 20.3 us per byte (10,000,000 bytes in 202.9 s, the
+ * worst sustained case, scrolling continuously), so 256 bytes is about
+ * 5.2 ms -- under a third of a frame, leaving the rest for one expensive
+ * primitive plus the remainder of the loop.
+ *
+ * It costs no throughput. The render core managed 219,000 loop passes a
+ * second while saturated, so even one byte per pass would outrun a 1 MHz
+ * 6809; 256 is three orders of magnitude clear of anything the guest can
+ * produce. The bound only ever binds on catch-up, which is exactly the case
+ * it exists to cap.
+ *
+ * THE CALLER MUST THEREFORE CALL AGAIN. Whatever is left drains on the next
+ * pass; if the guest outruns that, the FIFO backs up, TDRE deasserts and the
+ * 6809 waits -- which is the correct outcome. Better to make the guest wait
+ * than to miss a frame. */
+#define VID_LINK_DRAIN_MAX  256u
 void vid_link_render(void);
 
 /* ── Mouse ($FF12 VID.Mouse, read) ───────────────────────────────────────
