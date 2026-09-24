@@ -49,6 +49,7 @@
 #include "power.h"
 #include "usb.h"
 #include "vid_link.h"
+#include "win_store.h"
 #include "video.h"
 #include "video_render.h"   // video_frames, the cursor blink timebase
 
@@ -279,6 +280,13 @@ main()
 		printf("\nCore0 main 5V detected\n");
 		console_reprompt();
 	}
+
+	// Probe the parked-window store BEFORE Core 1 starts. The probe drives
+	// the QMI, which is shared with the flash XIP that both cores fetch
+	// from, so it belongs where nothing else is running -- and its answer
+	// is a capability the window model needs at first use, not later.
+	win_store_init();
+	win_store_print_status();
 
 	// Bring up the bus peripheral and launch Core 1 (bus engine + video).
 	bus_engine_start();

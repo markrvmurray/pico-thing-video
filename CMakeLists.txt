@@ -146,6 +146,7 @@ add_executable(pico-thing-video
 		src/registers.cpp
 		src/usb.cpp
 		src/vid_console.cpp
+		src/win_store.cpp
 		src/vid_link.cpp
 		src/video.cpp
 		src/video_render.cpp
@@ -203,6 +204,7 @@ target_link_libraries(pico-thing-video
 	hardware_i2c
 	hardware_irq
 	hardware_pio
+	hardware_psram
 	hardware_vreg
 	hardware_watchdog
 	tinyusb_board

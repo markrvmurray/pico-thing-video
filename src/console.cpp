@@ -30,6 +30,7 @@
 #include "registers.h"
 #include "usb.h"
 #include "vid_link.h"
+#include "win_store.h"
 
 extern "C" {
 typedef struct yy_buffer_state *YY_BUFFER_STATE;
@@ -103,6 +104,7 @@ print_status()
 	       vid_link_irq_asserted() ? "asserting" : "idle");
 	bus_engine_print_status();
 	core0_load_print();
+	win_store_print_status();
 	vid_link_print_status();
 	vid_link_mouse_print();
 	registers::dump();
