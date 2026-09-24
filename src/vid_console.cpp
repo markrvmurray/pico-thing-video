@@ -25,6 +25,7 @@
 #include <stdint.h>
 
 #include <stddef.h>
+#include <string.h>
 
 #include "video.h"
 #include "vid_link.h"
@@ -74,7 +75,7 @@ static int  pend_col;
  * exact framing would matter again. */
 static const uint8_t esc_params[0x56 - 0x20] = {
 	8, 1, 7, 0, 0, 4,	/* $20 DWSet Select OWSet OWEnd DWEnd CWArea */
-	0, 0, 0,		/* $26-$28 reserved */
+	1, 0, 0,		/* $26 DWShow, $27-$28 reserved */
 	4, 2, 9, 10, 6,		/* $29 DefGPB KillBuf GPLoad GetBlk PutBlk */
 	2, 1,			/* $2E PSet LSet */
 	0, 2, 1, 1, 1,		/* $30 DefPal Palette FColor BColor Border */
@@ -134,6 +135,48 @@ default_palette(void)
 	fcolor_reg = 7;			/* white */
 	bcolor_reg = 0;			/* black */
 }
+/* The window table. Entry 0 is the root and is never allocated a parked
+ * screen: the root's text IS the live layer whenever it is selected, and when
+ * it is not, it parks like any other. Identity is the guest's to choose, so
+ * this is indexed by id directly rather than searched -- an id beyond the
+ * table simply does not exist, which the read-back reports. */
+#define WIN_MAX		8u
+
+struct window {
+	bool	defined;
+	int	col0, row0, cols, rows;	/* clamped to the panel at DWSet */
+	int	cur_col, cur_row;	/* cursor WITHIN the window */
+	int	slot;			/* parked screen, or -1 for none */
+};
+
+static struct window windows[WIN_MAX];
+
+/* Two ideas that used to be one. Select chooses where text GOES; DWShow
+ * chooses what is ON SCREEN. Conflating them means a background shell writing
+ * a single line steals the display, which is the opposite of what windows are
+ * for -- so the target may be a window that nobody is looking at, and its text
+ * accumulates in its parked screen until someone shows it. */
+static unsigned      win_target;	/* Select: where text is written */
+static unsigned      win_shown;		/* DWShow: what the panel displays */
+
+static inline bool
+target_is_visible(void)
+{
+	return win_target == win_shown;
+}
+
+/* The target window's parked screen, or NULL when it has none (the root
+ * never does, and a window gets none if the store ran out). Writing to a
+ * window with no backing and no screen has nowhere to go, and is dropped --
+ * visibly, in that nothing appears when it is later shown. */
+static uint8_t *
+target_backing(void)
+{
+	const int slot = windows[win_target].slot;
+
+	return slot < 0 ? NULL : win_store_slot((unsigned)slot);
+}
+
 /* The current text window, in cells, and the cursor WITHIN it. Every text
  * operation below is bounded by this rectangle rather than by the panel, so
  * the coordinate model is the window's from here on.
@@ -158,25 +201,54 @@ win_is_root(void)
 static inline void
 put_cell(int col, int row, uint8_t ch, uint8_t attr)
 {
-	vidterm_putch(win_col0 + col, win_row0 + row, ch, attr);
+	if (target_is_visible()) {
+		vidterm_putch(win_col0 + col, win_row0 + row, ch, attr);
+		return;
+	}
+	uint8_t *p = target_backing();
+	if (p == NULL || col < 0 || col >= win_cols ||
+	    row < 0 || row >= win_rows)
+		return;
+	p[((size_t)row * (size_t)win_cols + (size_t)col) * 2u] = ch;
+	p[((size_t)row * (size_t)win_cols + (size_t)col) * 2u + 1u] = attr;
 }
 
-/* The window table. Entry 0 is the root and is never allocated a parked
- * screen: the root's text IS the live layer whenever it is selected, and when
- * it is not, it parks like any other. Identity is the guest's to choose, so
- * this is indexed by id directly rather than searched -- an id beyond the
- * table simply does not exist, which the read-back reports. */
-#define WIN_MAX		8u
+/* Scroll and clear have to work on whichever surface the target lives on.
+ * Off screen there is no dirty tracking and no blitting to do -- the parked
+ * screen is just bytes, and its contents reach the panel only when the window
+ * is shown. */
+static void
+surface_clear(int col, int row, int cols, int rows)
+{
+	if (target_is_visible()) {
+		vidterm_clear_region(win_col0 + col, win_row0 + row, cols,
+		    rows, ' ', CONSOLE_ATTR);
+		return;
+	}
+	for (int r = row; r < row + rows; r++)
+		for (int c = col; c < col + cols; c++)
+			put_cell(c, r, ' ', CONSOLE_ATTR);
+}
 
-struct window {
-	bool	defined;
-	int	col0, row0, cols, rows;	/* clamped to the panel at DWSet */
-	int	cur_col, cur_row;	/* cursor WITHIN the window */
-	int	slot;			/* parked screen, or -1 for none */
-};
-
-static struct window windows[WIN_MAX];
-static unsigned      win_current;	/* id of the selected window */
+static void
+surface_scroll(void)
+{
+	if (target_is_visible()) {
+		if (win_is_root())
+			vidterm_scroll_up(' ', CONSOLE_ATTR);
+		else
+			vidterm_scroll_region(win_col0, win_row0, win_cols,
+			    win_rows, ' ', CONSOLE_ATTR);
+		return;
+	}
+	uint8_t *p = target_backing();
+	if (p == NULL)
+		return;
+	const size_t stride = (size_t)win_cols * 2u;
+	memmove(p, p + stride, stride * (size_t)(win_rows - 1));
+	for (int c = 0; c < win_cols; c++)
+		put_cell(c, win_rows - 1, ' ', CONSOLE_ATTR);
+}
 
 static int  cur_col;
 static int  cur_row;
@@ -196,14 +268,14 @@ clear_all(void)
 	 * window and survives every switch, so only the root -- which IS the
 	 * panel -- may clear it. A window clearing itself must not wipe the
 	 * drawing every other window shares. */
-	if (win_is_root()) {
+	if (win_is_root() && target_is_visible()) {
 		vidterm_clear_graphics(palette[bcolor_reg & 0x0Fu]);
 		vidterm_clear(' ', CONSOLE_ATTR);
 	} else {
-		vidterm_clear_region(win_col0, win_row0, win_cols, win_rows,
-		    ' ', CONSOLE_ATTR);
+		surface_clear(0, 0, win_cols, win_rows);
 	}
-	vidterm_refresh();
+	if (target_is_visible())
+		vidterm_refresh();
 	cur_col = 0;
 	cur_row = 0;
 }
@@ -221,11 +293,8 @@ line_feed(void)
 {
 	if (cur_row < win_rows - 1)
 		cur_row++;
-	else if (win_is_root())
-		vidterm_scroll_up(' ', CONSOLE_ATTR);
 	else
-		vidterm_scroll_region(win_col0, win_row0, win_cols, win_rows,
-		    ' ', CONSOLE_ATTR);
+		surface_scroll();
 }
 
 /* 16-bit big-endian coordinate/parameter fetch from the ESC buffer. */
@@ -286,7 +355,7 @@ win_adopt(unsigned id)
 {
 	const struct window *w = &windows[id];
 
-	win_current = id;
+	win_target = id;
 	win_col0 = w->col0;
 	win_row0 = w->row0;
 	win_cols = w->cols;
@@ -303,8 +372,8 @@ win_adopt(unsigned id)
 static void
 win_stash_cursor(void)
 {
-	windows[win_current].cur_col = cur_col;
-	windows[win_current].cur_row = cur_row;
+	windows[win_target].cur_col = cur_col;
+	windows[win_target].cur_row = cur_row;
 }
 
 /* Clamp a requested rectangle to the panel. The guest is TOLD what it got
@@ -356,32 +425,60 @@ esc_exec(void)
 		 * where DWSet acts on the path it arrived on. */
 		win_stash_cursor();
 		win_adopt(id);
-		vidterm_clear_region(win_col0, win_row0, win_cols, win_rows,
-		    ' ', CONSOLE_ATTR);
-		dirty = true;
+		/* Defining a window clears it, wherever it lives. It does NOT
+		 * put itself on screen: visibility is DWShow's job alone, and
+		 * a guest that defines several windows up front should not
+		 * watch them flicker past. */
+		surface_clear(0, 0, win_cols, win_rows);
+		if (target_is_visible())
+			dirty = true;
 		break;
 	}
-	case 0x21u: {			/* Select: id */
+	case 0x21u: {			/* Select: id — OUTPUT TARGET only */
 		const unsigned id = esc_buf[0];
 		if (id >= WIN_MAX || !windows[id].defined)
 			break;
-		if (id == win_current)
+		if (id == win_target)
 			break;
+		/* No parking, no unparking, nothing on screen moves. A
+		 * descriptor may Select before every write burst, so this has
+		 * to be free of visible effect or a background shell would
+		 * flicker the display once per line. */
 		win_stash_cursor();
-		win_park(&windows[win_current]);
 		win_adopt(id);
+		break;
+	}
+	case 0x26u: {			/* DWShow: id — VISIBILITY only */
+		const unsigned id = esc_buf[0];
+		if (id >= WIN_MAX || !windows[id].defined)
+			break;
+		if (id == win_shown)
+			break;
+		/* The displayed window's text is the live layer, so showing a
+		 * different one is where the swap happens: park what is up,
+		 * restore what is coming. Cursor state belongs to the target,
+		 * which may be neither of them. */
+		win_park(&windows[win_shown]);
+		win_shown = id;
 		win_unpark(&windows[id]);
 		dirty = true;
 		break;
 	}
-	case 0x24u:			/* DWEnd: close the current window */
-		if (win_current != 0u) {
-			windows[win_current].defined = false;
-			vidterm_clear_region(win_col0, win_row0, win_cols,
-			    win_rows, ' ', CONSOLE_ATTR);
+	case 0x24u:			/* DWEnd: close the target window */
+		if (win_target != 0u) {
+			const unsigned gone = win_target;
+			windows[gone].defined = false;
+			if (win_shown == gone) {
+				/* Its rectangle is nobody's now; blank it and
+				 * fall back to the root, which always exists. */
+				vidterm_clear_region(windows[gone].col0,
+				    windows[gone].row0, windows[gone].cols,
+				    windows[gone].rows, ' ', CONSOLE_ATTR);
+				win_shown = 0u;
+				win_unpark(&windows[0]);
+				dirty = true;
+			}
 			win_adopt(0u);
-			win_unpark(&windows[0]);
-			dirty = true;
 		}
 		break;
 	case 0x30u:			/* DefPal */
@@ -622,7 +719,7 @@ vid_link_consume_flush(void)
 	/* Park the cursor wherever the burst left it. Doing this per burst
 	 * rather than per byte keeps a fast-moving cursor from flickering
 	 * through every intermediate cell of a line of output. */
-	if (claimed) {
+	if (claimed && target_is_visible()) {
 		vidterm_cursor_set(win_col0 + cur_col, win_row0 + cur_row);
 		vidterm_cursor_enable(cursor_shown);
 	}
@@ -646,6 +743,7 @@ vid_link_consume_reset(void)
 	windows[0].cur_col = 0;
 	windows[0].cur_row = 0;
 	windows[0].slot = -1;
+	win_shown = 0u;
 	win_adopt(0u);
 
 	/* Re-arm the lazy claim; the next byte clears and homes. */
