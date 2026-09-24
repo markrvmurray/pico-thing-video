@@ -145,6 +145,13 @@ default_palette(void)
 struct window {
 	bool	defined;
 	int	col0, row0, cols, rows;	/* clamped to the panel at DWSet */
+	/* The WORKING AREA: a sub-rectangle of the window, relative to its
+	 * corner, that text and graphics are actually confined to. CWArea
+	 * narrows it; DWSet resets it to the whole window. Kept separately
+	 * from the window's own geometry so narrowing is reversible and a
+	 * switch restores what the window had. */
+	int	wa_col, wa_row, wa_cols, wa_rows;
+	bool	protect;		/* false: graphics may leave the window */
 	int	cur_col, cur_row;	/* cursor WITHIN the window */
 	int	slot;			/* parked screen, or -1 for none */
 };
@@ -356,10 +363,10 @@ win_adopt(unsigned id)
 	const struct window *w = &windows[id];
 
 	win_target = id;
-	win_col0 = w->col0;
-	win_row0 = w->row0;
-	win_cols = w->cols;
-	win_rows = w->rows;
+	win_col0 = w->col0 + w->wa_col;
+	win_row0 = w->row0 + w->wa_row;
+	win_cols = w->wa_cols;
+	win_rows = w->wa_rows;
 	cur_col  = w->cur_col;
 	cur_row  = w->cur_row;
 
@@ -367,13 +374,25 @@ win_adopt(unsigned id)
 	 * plane itself stays global and shared -- this says where a primitive
 	 * lands, not which surface it lands on, so drawing survives any
 	 * window switch exactly as it did before. */
-	vidterm_set_clip(w->col0 * CHAR_W, w->row0 * CHAR_H,
-	    w->cols * CHAR_W, w->rows * CHAR_H);
+	vidterm_set_origin(win_col0 * CHAR_W, win_row0 * CHAR_H);
+	if (w->protect)
+		vidterm_set_clip(win_col0 * CHAR_W, win_row0 * CHAR_H,
+		    win_cols * CHAR_W, win_rows * CHAR_H);
+	else
+		/* Protection off: coordinates still measure from the window,
+		 * but the pixels may go anywhere on the panel. That is what
+		 * asking to draw outside your window means; it does not mean
+		 * drawing somewhere else. */
+		vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
 
 	/* The read-back must describe what was actually built, every time --
 	 * that is the whole contract behind clamping rather than refusing. */
-	vid_link_info_set((uint16_t)(w->cols * CHAR_W),
-	    (uint16_t)(w->rows * CHAR_H), (uint8_t)w->cols, (uint8_t)w->rows);
+	/* The WORKING AREA, not the window: what the guest can actually draw
+	 * on is what the read-back has to describe, or CWArea would narrow
+	 * the drawing surface without telling anyone. */
+	vid_link_info_set((uint16_t)(win_cols * CHAR_W),
+	    (uint16_t)(win_rows * CHAR_H), (uint8_t)win_cols,
+	    (uint8_t)win_rows);
 }
 
 static void
@@ -413,6 +432,11 @@ win_define(unsigned id, int x, int y, int cols, int rows)
 	w->row0 = y;
 	w->cols = cols;
 	w->rows = rows;
+	w->wa_col = 0;
+	w->wa_row = 0;
+	w->wa_cols = cols;
+	w->wa_rows = rows;
+	w->protect = true;		/* windows contain their own drawing */
 	w->cur_col = 0;
 	w->cur_row = 0;
 }
@@ -455,6 +479,41 @@ esc_exec(void)
 		win_adopt(id);
 		break;
 	}
+	case 0x25u: {			/* CWArea: x, y, sx, sy — within the window */
+		struct window *w = &windows[win_target];
+		int x = esc_buf[0], y = esc_buf[1];
+		int cw = esc_buf[2], ch = esc_buf[3];
+
+		/* Clamped to the WINDOW, exactly as DWSet is clamped to the
+		 * panel, and reported the same way: the guest reads back what
+		 * it got rather than what it asked for. */
+		if (x < 0) x = 0;
+		if (y < 0) y = 0;
+		if (x > w->cols - 1) x = w->cols - 1;
+		if (y > w->rows - 1) y = w->rows - 1;
+		if (cw < 1) cw = 1;
+		if (ch < 1) ch = 1;
+		if (x + cw > w->cols) cw = w->cols - x;
+		if (y + ch > w->rows) ch = w->rows - y;
+
+		w->wa_col = x;
+		w->wa_row = y;
+		w->wa_cols = cw;
+		w->wa_rows = ch;
+		win_adopt(win_target);	/* re-derive the coordinate model */
+		cur_col = 0;
+		cur_row = 0;
+		break;
+	}
+	case 0x36u:			/* DWProtSw: 0 off, non-zero on */
+		/* GRAPHICS only. Text stays inside its window whatever this
+		 * says, because wrap and scroll are DEFINED by the window --
+		 * unprotected text would have no edge to wrap at and no region
+		 * to scroll. A CoCo3 protects the boundary generally; here the
+		 * switch means what it can usefully mean. */
+		windows[win_target].protect = esc_buf[0] != 0u;
+		win_adopt(win_target);
+		break;
 	case 0x26u: {			/* DWShow: id — VISIBILITY only */
 		const unsigned id = esc_buf[0];
 		if (id >= WIN_MAX || !windows[id].defined)
@@ -753,6 +812,11 @@ vid_link_consume_reset(void)
 	windows[0].row0 = 0;
 	windows[0].cols = TEXT_COLS;
 	windows[0].rows = TEXT_ROWS;
+	windows[0].wa_col = 0;
+	windows[0].wa_row = 0;
+	windows[0].wa_cols = TEXT_COLS;
+	windows[0].wa_rows = TEXT_ROWS;
+	windows[0].protect = true;
 	windows[0].cur_col = 0;
 	windows[0].cur_row = 0;
 	windows[0].slot = -1;

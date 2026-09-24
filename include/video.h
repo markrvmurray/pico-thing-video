@@ -72,6 +72,11 @@ void vidterm_clear_region(int col, int row, int cols, int rows,
  * primitive lands, not which surface it lands on. */
 void vidterm_set_clip(int x, int y, int w, int h);
 
+/* Where the guest's 0,0 sits, in panel pixels. Separate from the clip because
+ * a window whose protection is off still measures from its own corner while
+ * its pixels are allowed outside it. */
+void vidterm_set_origin(int x, int y);
+
 void vidterm_read_row(int col, int row, int cols, uint8_t *dst);
 void vidterm_write_row(int col, int row, int cols, const uint8_t *src);
 void vidterm_scroll_region(int col, int row, int cols, int rows,

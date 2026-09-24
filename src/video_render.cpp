@@ -261,11 +261,19 @@ void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr)
  * lands. The pixels stay global and outlive any window switch. */
 static int clip_x0, clip_y0;
 static int clip_x1 = FB_WIDTH, clip_y1 = FB_HEIGHT;
+static int origin_x, origin_y;
 
-/* The rectangle is also the ORIGIN: primitive coordinates are relative to its
- * top-left. One call therefore says both "where does 0,0 mean" and "where do
- * the pixels stop", which is what a window is, and it keeps the translation in
- * one place rather than at every drawing site. */
+/* Origin and bounds are set separately because they stop coinciding the
+ * moment a window's protection is turned off: coordinates stay measured from
+ * the window, while the pixels are allowed out of it. Keeping them as one
+ * call would make "unprotected" mean "drawn somewhere else", which is not
+ * what a guest asking to draw outside its window means. */
+void vidterm_set_origin(int x, int y)
+{
+    origin_x = x;
+    origin_y = y;
+}
+
 void vidterm_set_clip(int x, int y, int w, int h)
 {
     clip_x0 = x < 0 ? 0 : x;
@@ -276,9 +284,8 @@ void vidterm_set_clip(int x, int y, int w, int h)
 
 static inline void plot_unlocked(int x, int y, uint8_t colour)
 {
-    if (x < 0 || y < 0) return;
-    const int px = clip_x0 + x, py = clip_y0 + y;
-    if (px < clip_x1 && py < clip_y1)
+    const int px = origin_x + x, py = origin_y + y;
+    if (px >= clip_x0 && px < clip_x1 && py >= clip_y0 && py < clip_y1)
         video_framebuffer[py][px] = colour;
 }
 
@@ -290,10 +297,10 @@ void vidterm_plot(int x, int y, uint8_t colour)
 
 void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
 {
-    int px0 = clip_x0 + (x < 0 ? 0 : x);
-    int py0 = clip_y0 + (y < 0 ? 0 : y);
-    int px1 = clip_x0 + x + w; if (px1 > clip_x1) px1 = clip_x1;
-    int py1 = clip_y0 + y + h; if (py1 > clip_y1) py1 = clip_y1;
+    int px0 = origin_x + x; if (px0 < clip_x0) px0 = clip_x0;
+    int py0 = origin_y + y; if (py0 < clip_y0) py0 = clip_y0;
+    int px1 = origin_x + x + w; if (px1 > clip_x1) px1 = clip_x1;
+    int py1 = origin_y + y + h; if (py1 > clip_y1) py1 = clip_y1;
     for (int row = py0; row < py1; row++)
         for (int i = px0; i < px1; i++)
             video_framebuffer[row][i] = colour;
@@ -301,22 +308,20 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
 
 void vidterm_hline(int x, int y, int len, uint8_t colour)
 {
-    if (y < 0) return;
-    const int py = clip_y0 + y;
-    if (py >= clip_y1) return;
-    int px0 = clip_x0 + (x < 0 ? 0 : x);
-    int px1 = clip_x0 + x + len; if (px1 > clip_x1) px1 = clip_x1;
+    const int py = origin_y + y;
+    if (py < clip_y0 || py >= clip_y1) return;
+    int px0 = origin_x + x; if (px0 < clip_x0) px0 = clip_x0;
+    int px1 = origin_x + x + len; if (px1 > clip_x1) px1 = clip_x1;
     for (int i = px0; i < px1; i++)
         video_framebuffer[py][i] = colour;
 }
 
 void vidterm_vline(int x, int y, int len, uint8_t colour)
 {
-    if (x < 0) return;
-    const int px = clip_x0 + x;
-    if (px >= clip_x1) return;
-    int py0 = clip_y0 + (y < 0 ? 0 : y);
-    int py1 = clip_y0 + y + len; if (py1 > clip_y1) py1 = clip_y1;
+    const int px = origin_x + x;
+    if (px < clip_x0 || px >= clip_x1) return;
+    int py0 = origin_y + y; if (py0 < clip_y0) py0 = clip_y0;
+    int py1 = origin_y + y + len; if (py1 > clip_y1) py1 = clip_y1;
     for (int i = py0; i < py1; i++)
         video_framebuffer[i][px] = colour;
 }
