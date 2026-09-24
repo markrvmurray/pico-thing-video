@@ -251,48 +251,74 @@ void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr)
 
 /* ───────────────────────── public API (graphics layer) ──────────────────── */
 
+/* The clip rectangle bounds the GUEST's drawing, and nothing else. Text
+ * blitting, the cursor and the mouse pointer are the firmware's own and stay
+ * screen-wide: a pointer that vanished at a window edge would be a bug, not a
+ * feature.
+ *
+ * There is one graphics plane and it belongs to no window, so clipping does
+ * not give a window its own drawing surface -- it bounds WHERE a primitive
+ * lands. The pixels stay global and outlive any window switch. */
+static int clip_x0, clip_y0;
+static int clip_x1 = FB_WIDTH, clip_y1 = FB_HEIGHT;
+
+/* The rectangle is also the ORIGIN: primitive coordinates are relative to its
+ * top-left. One call therefore says both "where does 0,0 mean" and "where do
+ * the pixels stop", which is what a window is, and it keeps the translation in
+ * one place rather than at every drawing site. */
+void vidterm_set_clip(int x, int y, int w, int h)
+{
+    clip_x0 = x < 0 ? 0 : x;
+    clip_y0 = y < 0 ? 0 : y;
+    clip_x1 = (x + w > FB_WIDTH)  ? FB_WIDTH  : x + w;
+    clip_y1 = (y + h > FB_HEIGHT) ? FB_HEIGHT : y + h;
+}
+
 static inline void plot_unlocked(int x, int y, uint8_t colour)
 {
-    if (x >= 0 && x < FB_WIDTH && y >= 0 && y < FB_HEIGHT)
-        video_framebuffer[y][x] = colour;
+    if (x < 0 || y < 0) return;
+    const int px = clip_x0 + x, py = clip_y0 + y;
+    if (px < clip_x1 && py < clip_y1)
+        video_framebuffer[py][px] = colour;
 }
 
 void vidterm_plot(int x, int y, uint8_t colour)
 {
-    if (x < 0 || x >= FB_WIDTH || y < 0 || y >= FB_HEIGHT) return;
-    video_framebuffer[y][x] = colour;
+    plot_unlocked(x, y, colour);
 }
+
 
 void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
 {
-    for (int row = y; row < y + h && row < FB_HEIGHT; row++) {
-        if (row < 0) continue;
-        int x0 = (x < 0) ? 0 : x;
-        int x1 = (x + w > FB_WIDTH) ? FB_WIDTH : x + w;
-        for (int i = x0; i < x1; i++) {
+    int px0 = clip_x0 + (x < 0 ? 0 : x);
+    int py0 = clip_y0 + (y < 0 ? 0 : y);
+    int px1 = clip_x0 + x + w; if (px1 > clip_x1) px1 = clip_x1;
+    int py1 = clip_y0 + y + h; if (py1 > clip_y1) py1 = clip_y1;
+    for (int row = py0; row < py1; row++)
+        for (int i = px0; i < px1; i++)
             video_framebuffer[row][i] = colour;
-        }
-    }
 }
 
 void vidterm_hline(int x, int y, int len, uint8_t colour)
 {
-    if (y < 0 || y >= FB_HEIGHT) return;
-    int x0 = (x < 0) ? 0 : x;
-    int x1 = (x + len > FB_WIDTH) ? FB_WIDTH : x + len;
-    for (int i = x0; i < x1; i++) {
-        video_framebuffer[y][i] = colour;
-    }
+    if (y < 0) return;
+    const int py = clip_y0 + y;
+    if (py >= clip_y1) return;
+    int px0 = clip_x0 + (x < 0 ? 0 : x);
+    int px1 = clip_x0 + x + len; if (px1 > clip_x1) px1 = clip_x1;
+    for (int i = px0; i < px1; i++)
+        video_framebuffer[py][i] = colour;
 }
 
 void vidterm_vline(int x, int y, int len, uint8_t colour)
 {
-    if (x < 0 || x >= FB_WIDTH) return;
-    int y0 = (y < 0) ? 0 : y;
-    int y1 = (y + len > FB_HEIGHT) ? FB_HEIGHT : y + len;
-    for (int i = y0; i < y1; i++) {
-        video_framebuffer[i][x] = colour;
-    }
+    if (x < 0) return;
+    const int px = clip_x0 + x;
+    if (px >= clip_x1) return;
+    int py0 = clip_y0 + (y < 0 ? 0 : y);
+    int py1 = clip_y0 + y + len; if (py1 > clip_y1) py1 = clip_y1;
+    for (int i = py0; i < py1; i++)
+        video_framebuffer[i][px] = colour;
 }
 
 void vidterm_line(int x0, int y0, int x1, int y1, uint8_t colour)

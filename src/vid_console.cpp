@@ -363,6 +363,13 @@ win_adopt(unsigned id)
 	cur_col  = w->cur_col;
 	cur_row  = w->cur_row;
 
+	/* Graphics coordinates become window-relative and bounded here. The
+	 * plane itself stays global and shared -- this says where a primitive
+	 * lands, not which surface it lands on, so drawing survives any
+	 * window switch exactly as it did before. */
+	vidterm_set_clip(w->col0 * CHAR_W, w->row0 * CHAR_H,
+	    w->cols * CHAR_W, w->rows * CHAR_H);
+
 	/* The read-back must describe what was actually built, every time --
 	 * that is the whole contract behind clamping rather than refusing. */
 	vid_link_info_set((uint16_t)(w->cols * CHAR_W),
@@ -547,7 +554,13 @@ esc_exec(void)
 		break;
 	}
 	case 0x4Eu:			/* PutGC: guest places the graphics cursor */
-		vidterm_pointer_set(p16(0), p16(2));
+		/* Translated by hand: every other primitive coordinate is
+		 * window-relative because the renderer's clip rectangle is
+		 * also its origin, but the pointer is a screen-wide overlay
+		 * and deliberately bypasses that. The guest should not have
+		 * to know which of its coordinates are special. */
+		vidterm_pointer_set(win_col0 * CHAR_W + p16(0),
+		    win_row0 * CHAR_H + p16(2));
 		break;
 	case 0x2Bu:			/* GPLoad: swallow the streamed payload */
 		esc_skip = (uint16_t)p16(7);

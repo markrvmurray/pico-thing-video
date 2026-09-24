@@ -66,6 +66,12 @@ void vidterm_clear_region(int col, int row, int cols, int rows,
 
 /* Move one row of cells between the live grid and a parked window's backing
  * store, characters and attributes interleaved. */
+/* Bound the GUEST's drawing primitives to a rectangle. Text, cursor and
+ * pointer are unaffected -- they are the firmware's own and stay screen-wide.
+ * There is one graphics plane shared by every window, so this bounds where a
+ * primitive lands, not which surface it lands on. */
+void vidterm_set_clip(int x, int y, int w, int h);
+
 void vidterm_read_row(int col, int row, int cols, uint8_t *dst);
 void vidterm_write_row(int col, int row, int cols, const uint8_t *src);
 void vidterm_scroll_region(int col, int row, int cols, int rows,
