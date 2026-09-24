@@ -28,6 +28,32 @@
 extern "C" {
 #endif
 
+/* THE GUEST MUST READ THIS WINDOW ONE BYTE AT A TIME. A 16-bit load
+ * straddling $FF10/$FF11 (LDD, LDX, LDU...) is forbidden, for two
+ * independent reasons:
+ *
+ * 1. READS HAVE SIDE EFFECTS here. A read of Data POPS the input FIFO and a
+ *    read of Mouse STEPS the snapshot index, so a 16-bit load consumes a
+ *    byte the guest never asked for and desynchronises a mouse pass. This
+ *    is the same trap that catches line-rendering monitors: on hardware
+ *    2026-09-22 a 6809 monitor's "examine" of a SINGLE byte at $FF10
+ *    rendered a full eight-byte line, reading every offset once.
+ *
+ * 2. It is the ONLY access pattern that can place two window accesses on
+ *    CONSECUTIVE bus cycles. Everything else is instruction-separated: LDA
+ *    extended is five cycles with the data read on the last, so two window
+ *    reads from separate instructions are at least five E cycles apart.
+ *    Pop-on-read runs in the bus read ISR and must restage before the next
+ *    access, and the measured worst case (0.73 us at 320 MHz) fits inside
+ *    five cycles at 3 MHz -- 1.67 us -- but NOT inside one bus cycle at
+ *    3 MHz, which is 0.33 us. The second half of a 16-bit load would be
+ *    served the byte still staged.
+ *
+ * At 1 MHz this is advice. At 3 MHz -- and Mark has HD6309 parts in stock
+ * -- it is load-bearing. Nothing in the firmware detects a violation: the
+ * guest is trusted here, deliberately, because policing it would put work
+ * in the hot path to catch a bug that belongs to the bus master. */
+
 #define VID_DATA_OFFSET   0u	/* $FF10 */
 #define VID_STAT_OFFSET   1u	/* $FF11 */
 #define VID_MOUSE_OFFSET  2u	/* $FF12 */
