@@ -7,7 +7,9 @@
 
 #include "pico/stdlib.h"
 #include "hardware/address_mapped.h"
+#include "hardware/clocks.h"
 #include "hardware/psram.h"
+#include "hardware/sync.h"
 #include "hardware/regs/addressmap.h"
 
 #include "win_store.h"
@@ -46,12 +48,49 @@ pattern_for(unsigned slot, unsigned word)
 	return 0xA5000000u ^ (slot * 0x9E3779B9u) ^ word;
 }
 
+/* PSRAM timing is derived from clk_sys, and the SDK derives it exactly once
+ * -- in a pre-main runtime_init hook, at whatever the boot clock happens to
+ * be. main() then raises clk_sys, and every one of those four parameters is
+ * left describing a clock that no longer exists: the divisor stops dividing
+ * far enough, the rx delay is sampled at the wrong point, and max-select and
+ * min-deselect are counted in system clock cycles so both shrink in real time.
+ *
+ * At a 150 MHz boot clock the divisor comes out at 2, giving 75 MHz. Raising
+ * clk_sys to 320 leaves the divisor alone and the part is driven at 160 MHz,
+ * against a 133 MHz maximum. It answers the detection that ran before the
+ * clock moved -- which is why the size looked right -- and returns garbage to
+ * every access afterwards.
+ *
+ * This is the third time this exact shape has bitten this firmware. clk_peri
+ * was dragged to 192 MHz and the console emitted garbage at 4x baud; clk_adc
+ * was dragged and read 2.9% low in silence. Same lesson each time: a
+ * peripheral's timing is computed against a clock, and moving the clock
+ * afterwards does not recompute it.
+ *
+ * So recompute it here, after the clock is settled. Interrupts are off
+ * because re-initialising walks the QMI that flash execution also uses, and
+ * Core 1 is not running yet -- this is called before bus_engine_start(). */
+static void
+retime_for_current_clock(void)
+{
+	const uint32_t save = save_and_disable_interrupts();
+
+	if (psram_configure_params(PICO_DEFAULT_PSRAM_MAX_FREQ,
+	    PICO_DEFAULT_PSRAM_MAX_SELECT,
+	    PICO_DEFAULT_PSRAM_MIN_DESELECT) == PICO_OK)
+		(void)psram_reinitialize();
+
+	restore_interrupts(save);
+}
+
 bool
 win_store_init(void)
 {
 	if (probed)
 		return usable > 0u;
 	probed = true;
+
+	retime_for_current_clock();
 	reported_size = psram_get_size();
 
 	if (reported_size < sizeof(slots)) {
