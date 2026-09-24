@@ -53,9 +53,24 @@ static int  pend_col;
  * ones this milestone does not act on and the reserved slots — so an
  * unimplemented command never desynchronises the stream. GPLoad ($2B) is
  * the one variable-length message: 9 header bytes then a bufSize payload,
- * swallowed via ST_ESC_SKIP. */
+ * swallowed via ST_ESC_SKIP.
+ *
+ * DELIBERATE DIVERGENCE FROM CoCo3, agreed with the NitrOS-9 side
+ * 2026-09-24: DWSet takes 8 params, not 7, and Select takes 1, not 0 -- in
+ * both cases a leading WINDOW ID. On a CoCo3 window identity rides on the
+ * device path (/w1, /w2) and never appears in the byte stream, so Select
+ * needs no operand. This link is deliberately ONE transparent pipe with no
+ * per-path state, so identity has nowhere else to come from: without the
+ * id, "select window 3" cannot be said at all, and neither can "select the
+ * panel". The guest owns the id space outright, so there is no allocation
+ * protocol and no read-back of an assigned id, and DWSet stays re-definable
+ * for an id it has already used. ID 0 IS THE ROOT -- the physical panel --
+ * which is what keeps the surface dimensions askable at VID.Info after a
+ * window has been selected. The id leads in both, so identity parses before
+ * geometry. Revisit only if the CoCo3 co-module branch is ever revived, when
+ * exact framing would matter again. */
 static const uint8_t esc_params[0x56 - 0x20] = {
-	7, 0, 7, 0, 0, 4,	/* $20 DWSet Select OWSet OWEnd DWEnd CWArea */
+	8, 1, 7, 0, 0, 4,	/* $20 DWSet Select OWSet OWEnd DWEnd CWArea */
 	0, 0, 0,		/* $26-$28 reserved */
 	4, 2, 9, 10, 6,		/* $29 DefGPB KillBuf GPLoad GetBlk PutBlk */
 	2, 1,			/* $2E PSet LSet */
