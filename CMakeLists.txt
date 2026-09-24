@@ -67,6 +67,20 @@ option(FAST_SYS_CLK_320 "Run clk_sys at 320 MHz with clk_hstx on PLL_USB" ON)
 # trim the handler's SRAM traffic or to move pop-on-read into the PIO.
 option(VIDEO_SCANOUT "Run the scan-out DMA (OFF = dark display, measurement only)" ON)
 
+# PSRAM size is DETECTED, not taken from the board header, and the reason is
+# not fussiness. In the header-only path the SDK never calls
+# gpio_set_function(PICO_PSRAM_CS_PIN, GPIO_FUNC_XIP_CS1) at all -- that call
+# lives inside its "#if PICO_AUTO_DETECT_PSRAM_SIZE" block -- so GPIO 47 never
+# drives chip select, every access goes nowhere, and psram_get_size() still
+# cheerfully reports the 8 MB the header claimed. Observed on hardware
+# 2026-09-24: configured, reported, and completely inert.
+#
+# Auto-detect fixes both halves. It assigns the pin its XIP_CS1 function, and
+# it MEASURES the size instead of believing the header -- and the SDK is
+# explicit that only the auto-detect paths verify a part is present at all.
+# The CS pin still comes from the board header, so nothing wiggles pins
+# hunting for it.
+
 # Flex and bison run on the BUILD HOST; the generated .c files are
 # cross-compiled for RP2350 by arm-none-eabi-gcc.
 #
@@ -160,6 +174,8 @@ if(USB_HOST_MODE)
 else()
 	target_sources(pico-thing-video PRIVATE src/usb_descriptors.cpp)
 endif()
+
+target_compile_definitions(pico-thing-video PRIVATE PICO_AUTO_DETECT_PSRAM_SIZE=1)
 
 if(NOT VIDEO_SCANOUT)
 	target_compile_definitions(pico-thing-video PRIVATE VIDEO_SCANOUT_OFF=1)

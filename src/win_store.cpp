@@ -101,13 +101,24 @@ win_store_print_status(void)
 	printf("Windows:     %u parked screens of %u B", usable,
 	       WIN_STORE_SLOT_BYTES);
 	if (usable == 0u) {
-		/* Say which way it failed. "Configured but absent" and "too
-		 * small" want different things looked at, and a bare zero
-		 * sends someone to read the wrong schematic. */
-		printf("  — NONE: PSRAM %s (reported %u B, need %u B)\n",
-		       reported_size == 0u ? "absent or not initialised" :
-		       "smaller than required",
-		       (unsigned)reported_size, (unsigned)sizeof(slots));
+		/* Say which way it failed, and say it ACCURATELY. The first
+		 * version of this reported "smaller than required" whenever
+		 * the size was non-zero, so a part that reported 8 MB and then
+		 * failed read-back printed a line accusing it of being too
+		 * small -- alongside the two numbers that disproved the
+		 * accusation. A diagnostic that names the wrong cause is worse
+		 * than one that admits it does not know. */
+		printf("  — NONE: ");
+		if (reported_size == 0u)
+			printf("PSRAM absent or not initialised\n");
+		else if (reported_size < sizeof(slots))
+			printf("PSRAM too small: %u B, need %u B\n",
+			       (unsigned)reported_size,
+			       (unsigned)sizeof(slots));
+		else
+			printf("read-back FAILED though %u B was reported"
+			       " — check the chip select\n",
+			       (unsigned)reported_size);
 		printf("             root window only; the console is"
 		       " unaffected\n");
 		return;
