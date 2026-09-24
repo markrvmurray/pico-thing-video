@@ -63,6 +63,11 @@ void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr);
  * one memmove is cheaper than doing it a row at a time. */
 void vidterm_clear_region(int col, int row, int cols, int rows,
                           uint8_t ch, uint8_t attr);
+
+/* Move one row of cells between the live grid and a parked window's backing
+ * store, characters and attributes interleaved. */
+void vidterm_read_row(int col, int row, int cols, uint8_t *dst);
+void vidterm_write_row(int col, int row, int cols, const uint8_t *src);
 void vidterm_scroll_region(int col, int row, int cols, int rows,
                            uint8_t fill_ch, uint8_t fill_attr); /* text grid up one row */
 

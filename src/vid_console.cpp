@@ -24,8 +24,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <stddef.h>
+
 #include "video.h"
 #include "vid_link.h"
+#include "win_store.h"
 
 /* White foreground on an OPAQUE black background: console overwrites and
  * scrolls must erase what was under them. (Transparent attrs are for the
@@ -158,6 +161,23 @@ put_cell(int col, int row, uint8_t ch, uint8_t attr)
 	vidterm_putch(win_col0 + col, win_row0 + row, ch, attr);
 }
 
+/* The window table. Entry 0 is the root and is never allocated a parked
+ * screen: the root's text IS the live layer whenever it is selected, and when
+ * it is not, it parks like any other. Identity is the guest's to choose, so
+ * this is indexed by id directly rather than searched -- an id beyond the
+ * table simply does not exist, which the read-back reports. */
+#define WIN_MAX		8u
+
+struct window {
+	bool	defined;
+	int	col0, row0, cols, rows;	/* clamped to the panel at DWSet */
+	int	cur_col, cur_row;	/* cursor WITHIN the window */
+	int	slot;			/* parked screen, or -1 for none */
+};
+
+static struct window windows[WIN_MAX];
+static unsigned      win_current;	/* id of the selected window */
+
 static int  cur_col;
 static int  cur_row;
 static bool cursor_shown = true;/* tracked; no visible cursor glyph yet */
@@ -225,12 +245,145 @@ s16(int i)
  * rest of the table is framed and ignored until the windowing milestone.
  * Coordinates are raw pixels on the 1024x480 plane for now (ScaleSw is
  * accepted but scaling is not yet applied); primitives clip per pixel. */
+/* Park the live text layer into a window's slot, and restore another's.
+ * Copying rather than pointer-swapping because a window is a RECTANGLE of the
+ * one grid, not a grid of its own: its rows are not contiguous, so there is
+ * nothing to repoint. */
+static void
+win_park(const struct window *w)
+{
+	if (w->slot < 0)
+		return;
+	uint8_t *p = win_store_slot((unsigned)w->slot);
+	if (p == NULL)
+		return;
+	for (int r = 0; r < w->rows; r++)
+		vidterm_read_row(w->col0, w->row0 + r, w->cols,
+		    &p[(size_t)r * (size_t)w->cols * 2u]);
+}
+
+static void
+win_unpark(const struct window *w)
+{
+	uint8_t *p = w->slot < 0 ? NULL : win_store_slot((unsigned)w->slot);
+
+	if (p == NULL) {
+		/* Never parked, or no store: show it empty rather than
+		 * showing whatever the previous window left behind. */
+		vidterm_clear_region(w->col0, w->row0, w->cols, w->rows,
+		    ' ', CONSOLE_ATTR);
+		return;
+	}
+	for (int r = 0; r < w->rows; r++)
+		vidterm_write_row(w->col0, w->row0 + r, w->cols,
+		    &p[(size_t)r * (size_t)w->cols * 2u]);
+}
+
+/* Adopt a window as the current one: its rectangle becomes the coordinate
+ * model and its cursor becomes the cursor. */
+static void
+win_adopt(unsigned id)
+{
+	const struct window *w = &windows[id];
+
+	win_current = id;
+	win_col0 = w->col0;
+	win_row0 = w->row0;
+	win_cols = w->cols;
+	win_rows = w->rows;
+	cur_col  = w->cur_col;
+	cur_row  = w->cur_row;
+
+	/* The read-back must describe what was actually built, every time --
+	 * that is the whole contract behind clamping rather than refusing. */
+	vid_link_info_set((uint16_t)(w->cols * CHAR_W),
+	    (uint16_t)(w->rows * CHAR_H), (uint8_t)w->cols, (uint8_t)w->rows);
+}
+
+static void
+win_stash_cursor(void)
+{
+	windows[win_current].cur_col = cur_col;
+	windows[win_current].cur_row = cur_row;
+}
+
+/* Clamp a requested rectangle to the panel. The guest is TOLD what it got
+ * rather than refused: a clamped window stays usable, and VID.Info reports
+ * the geometry actually built, so the guest's hit-testing cannot drift from
+ * ours. Refusing would need an error channel this link does not have. */
+static void
+win_define(unsigned id, int x, int y, int cols, int rows)
+{
+	struct window *w = &windows[id];
+
+	if (x < 0) x = 0;
+	if (y < 0) y = 0;
+	if (x > TEXT_COLS - 1) x = TEXT_COLS - 1;
+	if (y > TEXT_ROWS - 1) y = TEXT_ROWS - 1;
+	if (cols < 1) cols = 1;
+	if (rows < 1) rows = 1;
+	if (x + cols > TEXT_COLS) cols = TEXT_COLS - x;
+	if (y + rows > TEXT_ROWS) rows = TEXT_ROWS - y;
+
+	/* A slot is claimed once and kept: redefining a window's geometry must
+	 * not leak the screen it was already using. */
+	if (!w->defined)
+		w->slot = (id == 0u) ? -1 : (int)(id - 1u);
+	if (w->slot >= 0 && (unsigned)w->slot >= win_store_slots())
+		w->slot = -1;		/* no store for this one */
+
+	w->defined = true;
+	w->col0 = x;
+	w->row0 = y;
+	w->cols = cols;
+	w->rows = rows;
+	w->cur_col = 0;
+	w->cur_row = 0;
+}
+
 static void
 esc_exec(void)
 {
 	const uint8_t fg = palette[fcolor_reg & 0x0Fu];
 
 	switch (esc_op) {
+	case 0x20u: {			/* DWSet: id, type, x, y, sx, sy, fg, bg */
+		const unsigned id = esc_buf[0];
+		if (id >= WIN_MAX)
+			break;		/* no such window; read-back says so */
+		win_define(id, esc_buf[2], esc_buf[3], esc_buf[4], esc_buf[5]);
+		/* Defining a window makes it current, as it does on a CoCo3
+		 * where DWSet acts on the path it arrived on. */
+		win_stash_cursor();
+		win_adopt(id);
+		vidterm_clear_region(win_col0, win_row0, win_cols, win_rows,
+		    ' ', CONSOLE_ATTR);
+		dirty = true;
+		break;
+	}
+	case 0x21u: {			/* Select: id */
+		const unsigned id = esc_buf[0];
+		if (id >= WIN_MAX || !windows[id].defined)
+			break;
+		if (id == win_current)
+			break;
+		win_stash_cursor();
+		win_park(&windows[win_current]);
+		win_adopt(id);
+		win_unpark(&windows[id]);
+		dirty = true;
+		break;
+	}
+	case 0x24u:			/* DWEnd: close the current window */
+		if (win_current != 0u) {
+			windows[win_current].defined = false;
+			vidterm_clear_region(win_col0, win_row0, win_cols,
+			    win_rows, ' ', CONSOLE_ATTR);
+			win_adopt(0u);
+			win_unpark(&windows[0]);
+			dirty = true;
+		}
+		break;
 	case 0x30u:			/* DefPal */
 		default_palette();
 		break;
@@ -478,6 +631,23 @@ vid_link_consume_flush(void)
 extern "C" void
 vid_link_consume_reset(void)
 {
+	/* The root window IS the panel, and it must be a real table entry
+	 * before anything can Select back to it -- an uninitialised entry 0
+	 * would hand out a zero-sized rectangle and somebody else's parked
+	 * screen. It owns no slot: when the root is selected its text is the
+	 * live layer, and it parks like any other only once it is not. */
+	for (unsigned i = 0u; i < WIN_MAX; i++)
+		windows[i].defined = false;
+	windows[0].defined = true;
+	windows[0].col0 = 0;
+	windows[0].row0 = 0;
+	windows[0].cols = TEXT_COLS;
+	windows[0].rows = TEXT_ROWS;
+	windows[0].cur_col = 0;
+	windows[0].cur_row = 0;
+	windows[0].slot = -1;
+	win_adopt(0u);
+
 	/* Re-arm the lazy claim; the next byte clears and homes. */
 	claimed = false;
 	state = ST_NORMAL;

@@ -142,6 +142,13 @@ void vid_link_guest_read(uint8_t location);
  * its index, and hands the renderer's own re-arming to the render core. */
 void vid_link_stage(void);
 
+/* Tell the link what VID.Info should describe. Called by the console when a
+ * window is selected, so the guest's read-back reports the surface it is
+ * actually drawing on rather than the panel. Takes effect at the start of the
+ * next read pass, never part way through one. */
+void vid_link_info_set(uint16_t width_px, uint16_t height_px,
+    uint8_t cols, uint8_t rows);
+
 /* Bytes vid_link_render() will consume in ONE call. The drain used to run
  * until the FIFO was empty, so a single call could work through a full 2 KB
  * backlog: measured at 18 ms under a saturated console, against a 16.7 ms

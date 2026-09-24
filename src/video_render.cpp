@@ -154,6 +154,8 @@ void vidterm_puts(int col, int row, const char *s, uint8_t attr)
     }
 }
 
+static void mark_dirty_span(int row, int col, int cols);
+
 /* Mark cols [col, col+cols) of one row dirty. Rows are tracked as a bitmap a
  * word at a time, so a region has to set bits rather than whole words -- the
  * full-screen case could fill words wholesale because it covered every
@@ -162,6 +164,27 @@ static void mark_dirty_span(int row, int col, int cols)
 {
     for (int c = col; c < col + cols; c++)
         dirty_rows[row][c >> 5] |= 1u << (c & 31);
+}
+
+/* Row transfer between the live grid and a parked screen. Characters and
+ * attributes are stored in separate planes here but travel together, so the
+ * parked form interleaves them -- one contiguous run per row, which is what
+ * makes a window's backing a simple block rather than two. */
+void vidterm_read_row(int col, int row, int cols, uint8_t *dst)
+{
+    for (int i = 0; i < cols; i++) {
+        dst[i * 2]     = text_cells[row][col + i];
+        dst[i * 2 + 1] = text_attrs[row][col + i];
+    }
+}
+
+void vidterm_write_row(int col, int row, int cols, const uint8_t *src)
+{
+    for (int i = 0; i < cols; i++) {
+        text_cells[row][col + i] = src[i * 2];
+        text_attrs[row][col + i] = src[i * 2 + 1];
+    }
+    mark_dirty_span(row, col, cols);
 }
 
 void vidterm_clear_region(int col, int row, int cols, int rows,

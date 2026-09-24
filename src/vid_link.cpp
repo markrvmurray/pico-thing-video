@@ -181,7 +181,7 @@ __not_in_flash_func(vid_link_mouse_read)(void)
 }
 
 /* ---- VID.Info: the drawing surface, walked like the mouse snapshot ------ */
-static const uint8_t info_block[VID_INFO_LEN] = {
+static uint8_t info_block[VID_INFO_LEN] = {
 	(uint8_t)(FB_WIDTH  >> 8), (uint8_t)FB_WIDTH,
 	(uint8_t)(FB_HEIGHT >> 8), (uint8_t)FB_HEIGHT,
 	(uint8_t)TEXT_COLS,
@@ -189,20 +189,62 @@ static const uint8_t info_block[VID_INFO_LEN] = {
 };
 static uint8_t info_index;
 
+/* Selecting a window changes what this register describes, and the change
+ * arrives from the render core while the bus core is serving reads. Rather
+ * than lock, a new geometry waits in a shadow and is adopted only at index 0
+ * -- between passes -- so a pass that is under way finishes describing one
+ * surface rather than half of two. Same discipline as the mouse snapshot,
+ * for the same reason. */
+static volatile uint8_t info_shadow[VID_INFO_LEN];
+static volatile bool    info_shadow_valid;
+
+extern "C" void
+vid_link_info_set(uint16_t width_px, uint16_t height_px,
+    uint8_t cols, uint8_t rows)
+{
+	info_shadow[0] = (uint8_t)(width_px >> 8);
+	info_shadow[1] = (uint8_t)width_px;
+	info_shadow[2] = (uint8_t)(height_px >> 8);
+	info_shadow[3] = (uint8_t)height_px;
+	info_shadow[4] = cols;
+	info_shadow[5] = rows;
+	std::atomic_thread_fence(std::memory_order_release);
+	info_shadow_valid = true;
+}
+
+static inline void
+info_adopt_if_pending(void)
+{
+	if (!info_shadow_valid)
+		return;
+	std::atomic_thread_fence(std::memory_order_acquire);
+	for (unsigned i = 0u; i < VID_INFO_LEN; i++)
+		info_block[i] = info_shadow[i];
+	info_shadow_valid = false;
+}
+
 extern "C" void
 __not_in_flash_func(vid_link_info_read)(void)
 {
 	/* Bus core, from the read ISR: the byte has gone out, step on and
 	 * stage the next. Constant data, so no latching and nothing to hold
 	 * consistent -- unlike the mouse, a pass cannot tear. */
-	if (++info_index >= VID_INFO_LEN)
+	if (++info_index >= VID_INFO_LEN) {
 		info_index = 0u;
+		info_adopt_if_pending();
+	}
 	reg[VID_INFO_OFFSET] = info_block[info_index];
 }
 
 extern "C" void
 __not_in_flash_func(vid_link_info_write)(void)
 {
+	/* Homing the index is the START of a pass, which is exactly when a
+	 * geometry change may be taken up: adopting here means a guest that
+	 * selects a window and then reads Info sees the new surface on its
+	 * very next pass, rather than one pass later. */
+	info_adopt_if_pending();
+
 	/* Any value homes the index, so a pass is self-framing: write, then
 	 * read six. Handled synchronously in the write ISR for the same reason
 	 * the mouse is -- a guest may read in the very next instruction, which
