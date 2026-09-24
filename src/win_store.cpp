@@ -95,6 +95,34 @@ win_store_slot(unsigned i)
 	return uncached(slots[i]);
 }
 
+/* Turn "read-back failed" into evidence. Three things can produce that from
+ * the outside and they want different fixes: the part is not answering at all,
+ * the writes are being dropped (the XIP window is not writable), or one alias
+ * works and the other does not (the address arithmetic is wrong). Printing
+ * what was written beside what came back through BOTH aliases tells them
+ * apart in one flash instead of three. */
+static void
+win_store_diagnose(void)
+{
+	volatile uint32_t *cached = (volatile uint32_t *)slots[0];
+	volatile uint32_t *nocache = (volatile uint32_t *)uncached(slots[0]);
+	const uint32_t probe = 0x5A5AA5A5u;
+
+	printf("             probe: slot0 cached %p, uncached %p, in range %s\n",
+	       (void *)cached, (void *)nocache,
+	       psram_check_address((void *)slots[0]) ? "yes" : "NO");
+
+	*nocache = probe;
+	printf("             wrote %08lX uncached -> reads %08lX uncached,"
+	       " %08lX cached\n", (unsigned long)probe,
+	       (unsigned long)*nocache, (unsigned long)*cached);
+
+	*cached = ~probe;
+	printf("             wrote %08lX cached   -> reads %08lX uncached,"
+	       " %08lX cached\n", (unsigned long)~probe,
+	       (unsigned long)*nocache, (unsigned long)*cached);
+}
+
 void
 win_store_print_status(void)
 {
@@ -121,6 +149,7 @@ win_store_print_status(void)
 			       (unsigned)reported_size);
 		printf("             root window only; the console is"
 		       " unaffected\n");
+		win_store_diagnose();
 		return;
 	}
 	printf(" in %u B of PSRAM\n", (unsigned)reported_size);
