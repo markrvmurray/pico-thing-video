@@ -131,6 +131,33 @@ default_palette(void)
 	fcolor_reg = 7;			/* white */
 	bcolor_reg = 0;			/* black */
 }
+/* The current text window, in cells, and the cursor WITHIN it. Every text
+ * operation below is bounded by this rectangle rather than by the panel, so
+ * the coordinate model is the window's from here on.
+ *
+ * The root window is the whole panel, which is what makes this safe to land
+ * before any window can be created: with these at their initial values every
+ * operation reduces to exactly what it did before. */
+static int  win_col0;
+static int  win_row0;
+static int  win_cols = TEXT_COLS;
+static int  win_rows = TEXT_ROWS;
+
+static inline bool
+win_is_root(void)
+{
+	return win_col0 == 0 && win_row0 == 0 &&
+	    win_cols == TEXT_COLS && win_rows == TEXT_ROWS;
+}
+
+/* Write a cell in WINDOW coordinates. The single place the origin is added,
+ * so nothing below has to remember to do it. */
+static inline void
+put_cell(int col, int row, uint8_t ch, uint8_t attr)
+{
+	vidterm_putch(win_col0 + col, win_row0 + row, ch, attr);
+}
+
 static int  cur_col;
 static int  cur_row;
 static bool cursor_shown = true;/* tracked; no visible cursor glyph yet */
@@ -145,8 +172,17 @@ static bool dirty;		/* something rendered since last flush */
 static void
 clear_all(void)
 {
-	vidterm_clear_graphics(palette[bcolor_reg & 0x0Fu]);
-	vidterm_clear(' ', CONSOLE_ATTR);
+	/* Graphics is a single global plane that does not belong to any one
+	 * window and survives every switch, so only the root -- which IS the
+	 * panel -- may clear it. A window clearing itself must not wipe the
+	 * drawing every other window shares. */
+	if (win_is_root()) {
+		vidterm_clear_graphics(palette[bcolor_reg & 0x0Fu]);
+		vidterm_clear(' ', CONSOLE_ATTR);
+	} else {
+		vidterm_clear_region(win_col0, win_row0, win_cols, win_rows,
+		    ' ', CONSOLE_ATTR);
+	}
 	vidterm_refresh();
 	cur_col = 0;
 	cur_row = 0;
@@ -163,10 +199,13 @@ claim_screen(void)
 static void
 line_feed(void)
 {
-	if (cur_row < TEXT_ROWS - 1)
+	if (cur_row < win_rows - 1)
 		cur_row++;
-	else
+	else if (win_is_root())
 		vidterm_scroll_up(' ', CONSOLE_ATTR);
+	else
+		vidterm_scroll_region(win_col0, win_row0, win_cols, win_rows,
+		    ' ', CONSOLE_ATTR);
 }
 
 /* 16-bit big-endian coordinate/parameter fetch from the ESC buffer. */
@@ -277,7 +316,7 @@ static void
 erase_span(int row, int from, int to)
 {
 	for (int c = from; c < to; c++)
-		vidterm_putch(c, row, ' ', CONSOLE_ATTR);
+		put_cell(c, row, ' ', CONSOLE_ATTR);
 }
 
 /* Clamp a $02 positioning parameter: the wire value is coordinate + $20,
@@ -339,12 +378,12 @@ vid_link_consume(uint8_t b)
 			state = ST_NORMAL;
 		return;
 	case ST_XY_COL:
-		pend_col = xy_param(b, TEXT_COLS);
+		pend_col = xy_param(b, win_cols);
 		state = ST_XY_ROW;
 		return;
 	case ST_XY_ROW:
 		cur_col = pend_col;
-		cur_row = xy_param(b, TEXT_ROWS);
+		cur_row = xy_param(b, win_rows);
 		state = ST_NORMAL;
 		return;
 	case ST_CURSOR_ARG:
@@ -369,16 +408,16 @@ vid_link_consume(uint8_t b)
 		state = ST_ESC_OP;
 		break;
 	case 0x03u:			/* erase line (cursor column keeps) */
-		erase_span(cur_row, 0, TEXT_COLS);
+		erase_span(cur_row, 0, win_cols);
 		break;
 	case 0x04u:			/* erase to end of line */
-		erase_span(cur_row, cur_col, TEXT_COLS);
+		erase_span(cur_row, cur_col, win_cols);
 		break;
 	case 0x05u:			/* cursor off/on: $05 $20/$21 */
 		state = ST_CURSOR_ARG;
 		break;
 	case 0x06u:			/* cursor right (no glyph) */
-		if (++cur_col >= TEXT_COLS) {
+		if (++cur_col >= win_cols) {
 			cur_col = 0;
 			line_feed();
 		}
@@ -397,9 +436,9 @@ vid_link_consume(uint8_t b)
 		line_feed();
 		break;
 	case 0x0Bu:			/* erase to end of window */
-		erase_span(cur_row, cur_col, TEXT_COLS);
-		for (int r = cur_row + 1; r < TEXT_ROWS; r++)
-			erase_span(r, 0, TEXT_COLS);
+		erase_span(cur_row, cur_col, win_cols);
+		for (int r = cur_row + 1; r < win_rows; r++)
+			erase_span(r, 0, win_cols);
 		break;
 	case 0x0Cu:			/* clear window and home (both layers) */
 		clear_all();
@@ -409,8 +448,8 @@ vid_link_consume(uint8_t b)
 		break;
 	default:
 		if (b >= 0x20u) {	/* printable glyph */
-			vidterm_putch(cur_col, cur_row, b, CONSOLE_ATTR);
-			if (++cur_col >= TEXT_COLS) {
+			put_cell(cur_col, cur_row, b, CONSOLE_ATTR);
+			if (++cur_col >= win_cols) {
 				cur_col = 0;
 				line_feed();
 			}
@@ -431,7 +470,7 @@ vid_link_consume_flush(void)
 	 * rather than per byte keeps a fast-moving cursor from flickering
 	 * through every intermediate cell of a line of output. */
 	if (claimed) {
-		vidterm_cursor_set(cur_col, cur_row);
+		vidterm_cursor_set(win_col0 + cur_col, win_row0 + cur_row);
 		vidterm_cursor_enable(cursor_shown);
 	}
 }

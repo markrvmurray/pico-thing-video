@@ -154,6 +154,28 @@ void vidterm_puts(int col, int row, const char *s, uint8_t attr)
     }
 }
 
+/* Mark cols [col, col+cols) of one row dirty. Rows are tracked as a bitmap a
+ * word at a time, so a region has to set bits rather than whole words -- the
+ * full-screen case could fill words wholesale because it covered every
+ * column, which a window does not. */
+static void mark_dirty_span(int row, int col, int cols)
+{
+    for (int c = col; c < col + cols; c++)
+        dirty_rows[row][c >> 5] |= 1u << (c & 31);
+}
+
+void vidterm_clear_region(int col, int row, int cols, int rows,
+                          uint8_t ch, uint8_t attr)
+{
+    if (cols <= 0 || rows <= 0)
+        return;
+    for (int r = row; r < row + rows; r++) {
+        memset(&text_cells[r][col], ch,   (size_t)cols);
+        memset(&text_attrs[r][col], attr, (size_t)cols);
+        mark_dirty_span(r, col, cols);
+    }
+}
+
 void vidterm_clear(uint8_t ch, uint8_t attr)
 {
     memset(text_cells, ch,   sizeof(text_cells));
@@ -170,6 +192,22 @@ void vidterm_clear(uint8_t ch, uint8_t attr)
 void vidterm_refresh(void)
 {
     render_dirty_cells();
+}
+
+/* Scroll a rectangle up one text row. Unlike the full-screen case this cannot
+ * be one memmove: the rows of a window are not contiguous in the grid, so each
+ * row is moved separately from the one below it. */
+void vidterm_scroll_region(int col, int row, int cols, int rows,
+                           uint8_t fill_ch, uint8_t fill_attr)
+{
+    if (cols <= 0 || rows <= 0)
+        return;
+    for (int r = row; r < row + rows - 1; r++) {
+        memmove(&text_cells[r][col], &text_cells[r + 1][col], (size_t)cols);
+        memmove(&text_attrs[r][col], &text_attrs[r + 1][col], (size_t)cols);
+        mark_dirty_span(r, col, cols);
+    }
+    vidterm_clear_region(col, row + rows - 1, cols, 1, fill_ch, fill_attr);
 }
 
 void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr)

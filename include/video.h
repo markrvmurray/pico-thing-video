@@ -55,7 +55,16 @@ void vidterm_putch(int col, int row, uint8_t ch, uint8_t attr);
 void vidterm_puts(int col, int row, const char *s, uint8_t attr);
 void vidterm_clear(uint8_t ch, uint8_t attr);
 void vidterm_refresh(void);   /* blit dirty text cells into the framebuffer */
-void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr); /* text grid up one row */
+void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr);
+
+/* Region variants, for text windows: the same operations bounded to a
+ * rectangle of the grid instead of the whole panel. The full-screen calls
+ * above remain, because the root window is the whole panel and doing it in
+ * one memmove is cheaper than doing it a row at a time. */
+void vidterm_clear_region(int col, int row, int cols, int rows,
+                          uint8_t ch, uint8_t attr);
+void vidterm_scroll_region(int col, int row, int cols, int rows,
+                           uint8_t fill_ch, uint8_t fill_attr); /* text grid up one row */
 
 /* Text cursor. A blinking block, drawn by inverting the cell it sits on, so
  * the character underneath stays readable. It is composited during scan-out
