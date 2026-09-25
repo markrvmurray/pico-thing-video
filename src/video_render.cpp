@@ -91,6 +91,10 @@ static uint32_t       font_face_len;
 static bool           text_bold;
 
 /* Which buffer each selection came from, so a kill can drop it. */
+static uint8_t pattern_group, pattern_id;
+static bool    pattern_on;
+void vidterm_set_pattern(uint8_t group, uint8_t id);
+
 static uint8_t sel_font_group, sel_font_id;
 static uint8_t sel_ptr_group, sel_ptr_id;
 static bool    sel_font_on, sel_ptr_on;
@@ -118,6 +122,11 @@ static void vidterm_selection_dropped(uint8_t group, uint8_t id)
         sel_ptr_on = false;
         vidterm_set_cursor_sprite(NULL, 0, 0);
     }
+    /* The pattern is a kept pointer too -- into the cache when it fitted,
+     * into the pool when it did not. Either way the selection has to go when
+     * its buffer does. */
+    if (pattern_on && pattern_group == group && pattern_id == id)
+        vidterm_set_pattern(group, 0u);
 }
 
 void vidterm_select_font(uint8_t group, uint8_t id)
@@ -719,14 +728,49 @@ void vidterm_set_clip(int x, int y, int w, int h)
  * Like the mix modes, a pattern costs the run-based fast path: every pixel
  * needs its own lookup. Buffer zero means none, which is the default, so
  * again a guest that asks for nothing pays for nothing. */
-static uint8_t pattern_group, pattern_id;
-static bool    pattern_on;
+/* The pattern is RESOLVED ONCE, and copied into SRAM when it is small enough
+ * to fit. Looking it up per pixel was the first implementation and it was
+ * badly wrong twice over: a thirty-two entry table scan AND an uncached PSRAM
+ * read for every pixel of a fill. A full-screen patterned Bar is half a
+ * million pixels, so that is sixteen million comparisons and half a million
+ * PSRAM transactions -- tens of milliseconds, for a lookup into 256 bytes
+ * that could sit in SRAM.
+ *
+ * The same mistake was already avoided for the font, which is resolved once
+ * at select time for exactly this reason. The pattern should have followed it
+ * and did not. */
+#define PATTERN_CACHE_BYTES	256u	/* a 16x16 weave, the usual size */
+
+static uint8_t       pattern_cache[PATTERN_CACHE_BYTES];
+static const uint8_t *pattern_data;	/* cache, or straight into PSRAM */
+static int           pattern_w, pattern_h;
 
 void vidterm_set_pattern(uint8_t group, uint8_t id)
 {
+    uint16_t xs = 0, ys = 0;
+    const uint8_t *p = (id == 0u) ? NULL :
+        vidterm_buf_data(group, id, NULL, &xs, &ys);
+
     pattern_group = group;
     pattern_id = id;
-    pattern_on = (id != 0u);
+
+    if (p == NULL || xs == 0 || ys == 0) {
+        pattern_on = false;
+        pattern_data = NULL;
+        return;
+    }
+    pattern_w = xs;
+    pattern_h = ys;
+    if ((uint32_t)xs * ys <= PATTERN_CACHE_BYTES) {
+        memcpy(pattern_cache, p, (size_t)xs * ys);
+        pattern_data = pattern_cache;
+    } else {
+        /* Too big to cache. The table scan is still gone, which is the
+         * larger of the two costs; the PSRAM read per pixel remains and a
+         * guest using a pattern this large has chosen that. */
+        pattern_data = p;
+    }
+    pattern_on = true;
 }
 
 enum { LOGIC_NORMAL = 0, LOGIC_AND = 1, LOGIC_OR = 2, LOGIC_XOR = 3 };
@@ -740,16 +784,10 @@ void vidterm_set_logic(uint8_t mode)
 /* One pixel, in ABSOLUTE coordinates, already known to be inside the clip. */
 static inline uint8_t pattern_at(int px, int py, uint8_t fallback)
 {
-    const struct gfx_buf *b;
-    const uint8_t *p;
-
     if (!pattern_on)
         return fallback;
-    b = gfx_find(pattern_group, pattern_id);
-    p = gfx_buf_bytes(b);
-    if (p == NULL || b->xsize == 0 || b->ysize == 0)
-        return fallback;
-    return p[(size_t)(py % b->ysize) * b->xsize + (px % b->xsize)];
+    return pattern_data[(size_t)(py % pattern_h) * pattern_w +
+                        (px % pattern_w)];
 }
 
 static inline void put_pixel_abs(int px, int py, uint8_t src)
