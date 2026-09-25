@@ -150,6 +150,21 @@ void vidterm_buf_get(uint8_t group, uint8_t id, int x, int y, int w, int h);
 void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y);
 void vidterm_buf_stats(uint32_t *used, uint32_t *high, unsigned *count);
 
+/* The last GetBlk and PutBlk AS DECODED, with how many of each have run.
+ * This reports what the renderer was told, not what the guest sent: while the
+ * stream keeps its framing those agree, and when they disagree the parameters
+ * name the fault. A coordinate here that the guest never sent means a byte
+ * was lost upstream of the decode; the right coordinate means it was not, and
+ * the loss is downstream. Nothing else distinguishes those, because a wrong
+ * but plausible coordinate draws a perfectly ordinary block. */
+struct vidterm_blk_info {
+	uint32_t gets, puts;
+	int16_t  get_x, get_y, get_w, get_h;
+	int16_t  put_x, put_y;
+	uint8_t  get_id, put_id;
+};
+void vidterm_blk_stats(struct vidterm_blk_info *o);
+
 /* Fill pattern, tiled in SCREEN coordinates so abutting fills line up.
  * Buffer 0 means none. */
 void vidterm_set_pattern(uint8_t group, uint8_t id);

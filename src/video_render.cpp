@@ -298,6 +298,29 @@ const uint8_t *vidterm_buf_data(uint8_t group, uint8_t id, uint32_t *len,
     return p;
 }
 
+/* What the LAST block command decoded to, as opposed to what the guest sent.
+ * Those are the same thing only while the stream keeps its framing, and when
+ * they differ the difference is the whole diagnosis: a stamp landing at a
+ * coordinate the guest never asked for says a byte was lost upstream, and a
+ * stamp landing where it was asked says the loss is somewhere else. Reading
+ * the parameters back is the only way to tell those apart from this end --
+ * the picture cannot, because a plausible wrong coordinate draws a perfectly
+ * ordinary-looking block. */
+static uint32_t blk_get_count, blk_put_count;
+static int16_t blk_get_x, blk_get_y, blk_get_w, blk_get_h;
+static int16_t blk_put_x, blk_put_y;
+static uint8_t blk_get_id, blk_put_id;
+
+void vidterm_blk_stats(struct vidterm_blk_info *o)
+{
+    o->gets = blk_get_count;
+    o->puts = blk_put_count;
+    o->get_x = blk_get_x; o->get_y = blk_get_y;
+    o->get_w = blk_get_w; o->get_h = blk_get_h;
+    o->put_x = blk_put_x; o->put_y = blk_put_y;
+    o->get_id = blk_get_id; o->put_id = blk_put_id;
+}
+
 void vidterm_buf_stats(uint32_t *used, uint32_t *high, unsigned *count)
 {
     unsigned n = 0;
@@ -1093,6 +1116,13 @@ void vidterm_buf_get(uint8_t group, uint8_t id, int x, int y, int w, int h)
     struct gfx_buf *b = gfx_find(group, id);
     uint8_t *p = gfx_buf_bytes(b);
 
+    /* Recorded before the early returns: a command that was decoded and then
+     * refused looks identical from outside to one that never arrived. */
+    blk_get_count = blk_get_count + 1u;
+    blk_get_id = id;
+    blk_get_x = (int16_t)x; blk_get_y = (int16_t)y;
+    blk_get_w = (int16_t)w; blk_get_h = (int16_t)h;
+
     if (p == NULL || w <= 0 || h <= 0)
         return;
     if ((uint32_t)w * (uint32_t)h > b->len)
@@ -1128,6 +1158,10 @@ void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y)
 {
     const struct gfx_buf *b = gfx_find(group, id);
     const uint8_t *p = gfx_buf_bytes(b);
+
+    blk_put_count = blk_put_count + 1u;
+    blk_put_id = id;
+    blk_put_x = (int16_t)x; blk_put_y = (int16_t)y;
 
     if (p == NULL || b->xsize == 0 || b->ysize == 0)
         return;

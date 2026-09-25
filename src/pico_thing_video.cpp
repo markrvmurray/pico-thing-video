@@ -179,6 +179,20 @@ core0_load_print(void)
 	vidterm_buf_stats(&buf_used, &buf_high, &buf_count);
 	printf("Buffers:     %u live, %lu B used, %lu B high water\n",
 	       buf_count, (unsigned long)buf_used, (unsigned long)buf_high);
+	// The last block command as DECODED. Compared against the sequence the
+	// guest believes it sent, this says whether the stream kept its
+	// framing -- and a stamp at a coordinate nobody sent is the only
+	// direct evidence of a lost byte, since the picture just shows an
+	// ordinary block in an odd place.
+	struct vidterm_blk_info blk;
+	vidterm_blk_stats(&blk);
+	if (blk.gets != 0u || blk.puts != 0u)
+		printf("Blocks:      %lu get (last id %u %d,%d %dx%d), "
+		       "%lu put (last id %u %d,%d)\n",
+		       (unsigned long)blk.gets, blk.get_id,
+		       blk.get_x, blk.get_y, blk.get_w, blk.get_h,
+		       (unsigned long)blk.puts, blk.put_id,
+		       blk.put_x, blk.put_y);
 	printf("Bus priority: scan-out DMA %s the cores\n",
 	       video_get_dma_priority() ? "outranks" : "EQUAL to");
 	printf("Text blit:   %lu cells, worst refresh %lu (full screen %u)\n",
