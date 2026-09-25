@@ -83,6 +83,19 @@ static inline uint8_t font_row(uint8_t ch, int row)
 
 /* ────────────────────── text cell rendering (blitting) ──────────────────── */
 
+/* A glyph row is exactly CHAR_W bytes and starts CHAR_W-aligned, so it is two
+ * aligned words. Written inline rather than through memset: at eight bytes a
+ * call costs more than the stores it makes, and there are sixteen of them per
+ * cell and 3840 cells in a full-screen refresh. */
+static inline void
+fill_cell_row(uint8_t *line, uint8_t colour)
+{
+    const uint32_t v = (uint32_t)colour * 0x01010101u;
+    uint32_t w[2] = { v, v };
+
+    memcpy(line, w, CHAR_W);
+}
+
 static void OPTIMIZE_O3
 blit_char_cell(int col, int row)
 {
@@ -111,11 +124,11 @@ blit_char_cell(int col, int row)
          * branches and eight byte stores become one run. */
         if (mask == 0x00) {
             if (!transparent)
-                memset(line, bg, CHAR_W);
+                fill_cell_row(line, bg);
             continue;
         }
         if (mask == 0xFF) {
-            memset(line, fg, CHAR_W);
+            fill_cell_row(line, fg);
             continue;
         }
 
@@ -131,8 +144,24 @@ blit_char_cell(int col, int row)
     }
 }
 
+/* Instrumentation, because this has now been diagnosed wrongly twice. The
+ * render timer says a call was slow; it cannot say whether the time went into
+ * the text blitter or a drawing primitive, and both can be provoked by a
+ * single guest byte. Counting cells separates them: a full-screen refresh is
+ * 3840 of them and nothing else comes close. */
+static uint32_t blit_cells_total;
+static uint32_t blit_cells_max;
+
+void vidterm_blit_stats(uint32_t *total, uint32_t *worst)
+{
+    *total = blit_cells_total;
+    *worst = blit_cells_max;
+}
+
 static void render_dirty_cells(void)
 {
+    uint32_t blitted = 0;
+
     for (int row = 0; row < TEXT_ROWS; row++) {
         {
             uint32_t any = 0;
@@ -145,10 +174,14 @@ static void render_dirty_cells(void)
             uint32_t bit = 1u << (col & 31);
             if (dirty_rows[row][word] & bit) {
                 blit_char_cell(col, row);
+                blitted++;
                 dirty_rows[row][word] &= ~bit;
             }
         }
     }
+    blit_cells_total += blitted;
+    if (blitted > blit_cells_max)
+        blit_cells_max = blitted;
 }
 
 /* ───────────────────────── public API (text layer) ──────────────────────── */

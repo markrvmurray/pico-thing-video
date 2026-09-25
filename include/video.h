@@ -77,6 +77,12 @@ void vidterm_set_clip(int x, int y, int w, int h);
  * its pixels are allowed outside it. */
 void vidterm_set_origin(int x, int y);
 
+/* Text cells blitted: cumulative, and the worst single refresh. A
+ * whole-screen repaint is 3840 and nothing else approaches it, so this says
+ * whether a slow render call was the text layer or a drawing primitive --
+ * which the render timer alone cannot distinguish. */
+void vidterm_blit_stats(uint32_t *total, uint32_t *worst);
+
 void vidterm_read_row(int col, int row, int cols, uint8_t *dst);
 void vidterm_write_row(int col, int row, int cols, const uint8_t *src);
 void vidterm_scroll_region(int col, int row, int cols, int rows,

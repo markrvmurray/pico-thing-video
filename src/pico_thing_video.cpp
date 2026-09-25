@@ -139,6 +139,14 @@ core0_load_print(void)
 	// refresh rate.
 	const uint32_t frames = video_frames - core0_epoch_frame;
 	const uint32_t period = frames ? elapsed / frames : 0u;
+	// What a slow render call actually did. A whole-screen repaint is
+	// 3840 cells; a drawing primitive is none. The timer says "slow", this
+	// says "at what", and the distinction has been got wrong twice.
+	uint32_t blit_total, blit_worst;
+	vidterm_blit_stats(&blit_total, &blit_worst);
+	printf("Text blit:   %lu cells, worst refresh %lu (full screen %u)\n",
+	       (unsigned long)blit_total, (unsigned long)blit_worst,
+	       (unsigned)(TEXT_COLS * TEXT_ROWS));
 	printf("Service:     worst gap %lu us (frame %lu us)%s\n",
 	       (unsigned long)service_max_us, (unsigned long)period,
 	       (period && service_max_us > period) ? "  LATE" : "");
