@@ -673,6 +673,104 @@ void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
     }
 }
 
+/* ───────────────────────────── flood fill ───────────────────────────────── */
+
+/* Seeds waiting to be grown. A SCANLINE fill, so what is stacked is one seed
+ * per run of unfilled pixels on the row above or below a completed span --
+ * not one entry per pixel, which is what makes a bound of this size workable
+ * where a per-pixel stack would need thousands.
+ *
+ * Bounded because there is about 7 KB of SRAM spare and a flood fill over a
+ * 1024x480 plane cannot be allowed to decide for itself how much of it to
+ * take. Recursion was never an option for the same reason: the C stack here
+ * is 4 KB a core.
+ *
+ * WHEN THE BOUND IS REACHED the seed is dropped and counted. The region then
+ * fills incompletely, which is visibly wrong -- but it is wrong in a way that
+ * stops, rather than one that corrupts memory, and the counter says it
+ * happened rather than leaving someone to wonder why a shape has a notch in
+ * it. */
+#define FILL_STACK_MAX	96u
+
+static struct { int16_t x, y; } fill_stack[FILL_STACK_MAX];
+static uint32_t fill_overflows;
+
+void vidterm_fill_stats(uint32_t *overflows)
+{
+    *overflows = fill_overflows;
+}
+
+static inline void fill_span_abs(int px0, int px1, int py, uint8_t colour)
+{
+    memset(&video_framebuffer[py][px0], colour, (size_t)(px1 - px0));
+    shadow_fill_span(px0, px1, py, colour);
+}
+
+void vidterm_flood_fill(int x, int y, uint8_t colour)
+{
+    const int sx = origin_x + x, sy = origin_y + y;
+
+    if (sx < clip_x0 || sx >= clip_x1 || sy < clip_y0 || sy >= clip_y1)
+        return;
+
+    const uint8_t target = video_framebuffer[sy][sx];
+
+    /* Filling a region with the colour it already is has nothing to do, and
+     * attempting it would never terminate: every pixel examined would match
+     * the target after being written, so every neighbour would be seeded
+     * again forever. */
+    if (target == colour)
+        return;
+
+    unsigned sp = 0;
+    fill_stack[sp].x = (int16_t)sx;
+    fill_stack[sp].y = (int16_t)sy;
+    sp++;
+
+    while (sp > 0u) {
+        sp--;
+        const int py = fill_stack[sp].y;
+        int px = fill_stack[sp].x;
+
+        /* A seed can be stale: another span may have reached it between
+         * being pushed and being popped. */
+        if (video_framebuffer[py][px] != target)
+            continue;
+
+        int x1 = px, x2 = px;
+        while (x1 > clip_x0 && video_framebuffer[py][x1 - 1] == target)
+            x1--;
+        while (x2 < clip_x1 - 1 && video_framebuffer[py][x2 + 1] == target)
+            x2++;
+
+        fill_span_abs(x1, x2 + 1, py, colour);
+
+        /* One seed per RUN on each neighbouring row, not per pixel: after
+         * seeding a run, skip to its end. That is the whole economy of the
+         * scanline method. */
+        for (int ny = py - 1; ny <= py + 1; ny += 2) {
+            if (ny < clip_y0 || ny >= clip_y1)
+                continue;
+            int i = x1;
+            while (i <= x2) {
+                if (video_framebuffer[ny][i] != target) {
+                    i++;
+                    continue;
+                }
+                if (sp < FILL_STACK_MAX) {
+                    fill_stack[sp].x = (int16_t)i;
+                    fill_stack[sp].y = (int16_t)ny;
+                    sp++;
+                } else {
+                    fill_overflows++;
+                }
+                while (i <= x2 && video_framebuffer[ny][i] == target)
+                    i++;
+            }
+        }
+    }
+}
+
 void vidterm_circle(int cx, int cy, int radius, uint8_t colour)
 {
     int x = 0, y = radius;

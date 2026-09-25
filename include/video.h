@@ -128,6 +128,13 @@ void vidterm_vline(int x, int y, int len, uint8_t colour);
 void vidterm_circle(int cx, int cy, int radius, uint8_t colour);
 void vidterm_ellipse(int cx, int cy, int rx, int ry, uint8_t colour);
 void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour);
+
+/* Flood fill from a seed, bounded by pixels differing from the seed's own
+ * colour and by the clip rectangle. The seed stack is finite; see the note in
+ * video_render.cpp for what happens when it runs out, and vidterm_fill_stats()
+ * for whether it ever has. */
+void vidterm_flood_fill(int x, int y, uint8_t colour);
+void vidterm_fill_stats(uint32_t *overflows);
 void vidterm_clear_graphics(uint8_t colour);
 
 #ifdef __cplusplus

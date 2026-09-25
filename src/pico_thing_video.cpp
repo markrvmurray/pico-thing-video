@@ -162,6 +162,14 @@ core0_load_print(void)
 	// says "at what", and the distinction has been got wrong twice.
 	uint32_t blit_total, blit_worst;
 	vidterm_blit_stats(&blit_total, &blit_worst);
+	// Zero here is the expected reading. A non-zero count means a flood
+	// fill ran out of seeds and left a region part-filled, which is
+	// visible on screen but easy to blame on the guest's geometry.
+	uint32_t fill_over;
+	vidterm_fill_stats(&fill_over);
+	if (fill_over != 0u)
+		printf("Flood fill:  %lu seeds DROPPED — fills were incomplete\n",
+		       (unsigned long)fill_over);
 	printf("Bus priority: scan-out DMA %s the cores\n",
 	       video_get_dma_priority() ? "outranks" : "EQUAL to");
 	printf("Text blit:   %lu cells, worst refresh %lu (full screen %u)\n",

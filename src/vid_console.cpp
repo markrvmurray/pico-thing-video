@@ -632,6 +632,9 @@ esc_exec(void)
 		}
 		break;
 	}
+	case 0x4Fu:			/* FFill: flood from the draw pointer */
+		vidterm_flood_fill(dp_x, dp_y, fg);
+		break;
 	case 0x50u:			/* Circle: radius, centred on the pointer */
 		vidterm_ellipse(dp_x, dp_y, p16(0), p16(0), fg);
 		break;
