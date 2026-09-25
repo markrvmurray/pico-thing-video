@@ -56,8 +56,22 @@ enum : uint8_t {
 	KEY_SEMICOLON = 0x33, KEY_APOSTROPHE = 0x34, KEY_GRAVE = 0x35,
 	KEY_COMMA = 0x36, KEY_PERIOD = 0x37, KEY_SLASH = 0x38,
 	KEY_CAPS_LOCK = 0x39,
+	KEY_F1 = 0x3A, KEY_F12 = 0x45,
 	KEY_EUROPE_2 = 0x64,
 };
+
+/* The function keys reach the guest as $80-$8B, one per key, F1 first.
+ *
+ * They are for the guest to spend as it likes -- the driver's window switch
+ * is the use in view -- and this end takes no opinion on what they mean. It
+ * only guarantees they are DISTINGUISHABLE: nothing else this cooker emits
+ * lands in $80-$8B, so a byte in that range came from a function key and
+ * from nothing else. (The two high codes that are emitted, £ at $9C and ¬ at
+ * $AA, sit well clear.)
+ *
+ * They were previously dropped, so this adds bytes to the stream that no
+ * guest can already be relying on. */
+#define KEY_FN_BASE	0x80u
 
 enum : uint8_t {
 	MOD_LEFTCTRL = 0x01, MOD_LEFTSHIFT = 0x02,
@@ -109,6 +123,11 @@ uk_cook(uint8_t kc, bool shift, bool caps)
 	case KEY_8:             return shift ? '*'  : '8';
 	case KEY_9:             return shift ? '('  : '9';
 	case KEY_0:             return shift ? ')'  : '0';
+
+	case KEY_F1: case KEY_F1 + 1: case KEY_F1 + 2:  case KEY_F1 + 3:
+	case KEY_F1 + 4: case KEY_F1 + 5: case KEY_F1 + 6: case KEY_F1 + 7:
+	case KEY_F1 + 8: case KEY_F1 + 9: case KEY_F1 + 10: case KEY_F12:
+		return (uint8_t)(KEY_FN_BASE + (kc - KEY_F1));
 
 	case KEY_ENTER:         return 0x0D;  /* CR: the OS-9 line terminator
 	                                       * (and the guest input contract) */
