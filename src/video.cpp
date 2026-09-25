@@ -270,7 +270,9 @@ static void hstx_dvi_init(void)
     irq_set_priority(VIDEO_DMA_IRQ, 0);
     irq_set_enabled(VIDEO_DMA_IRQ, true);
 
-    video_set_dma_priority(true);
+    /* EQUAL, not DMA-first. See video_set_dma_priority() for the measurement
+     * that changed this. */
+    video_set_dma_priority(false);
 
 #if VIDEO_SCANOUT_OFF
     /* Measurement build: everything above is configured but never started, so
@@ -298,7 +300,24 @@ static void hstx_dvi_init(void)
  * which has a whole line of slack. That is the argument that this may be
  * safe. It is an argument, not a measurement, which is why this is a runtime
  * toggle: if the display suffers it can be put back from the console without
- * a reflash, and the console is on UART so it stays reachable either way. */
+ * a reflash, and the console is on UART so it stays reachable either way.
+ *
+ * MEASURED 2026-09-25, and the default is now EQUAL. Against the same
+ * workload, giving the DMA priority cost:
+ *
+ *     worst render call   16532 us  ->  8269 us
+ *     frames missed          none in either, over 7020 frames
+ *     display                unaffected, no tearing, no loss of sync
+ *
+ * Two times, for nothing gained. The deadline argument was sound in shape
+ * and wrong in fact: the transfer has a line of slack and never needed to win
+ * every arbitration to meet it. The cost of assuming otherwise was paid by
+ * every framebuffer write on both cores, all the time.
+ *
+ * Kept as a toggle rather than deleted, because one session at one workload
+ * is not proof. It wants exercising with USB input, bus traffic and rendering
+ * all at once before anyone calls it settled -- and if scan-out ever does
+ * starve, this is the first thing to put back. */
 void video_set_dma_priority(bool high)
 {
     bus_ctrl_hw->priority = high ?
