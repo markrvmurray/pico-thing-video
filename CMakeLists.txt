@@ -160,6 +160,7 @@ add_executable(pico-thing-video
 		src/registers.cpp
 		src/usb.cpp
 		src/vid_console.cpp
+		src/gfx_bufs.cpp
 		src/gfx_shadow.cpp
 		src/win_store.cpp
 		src/vid_link.cpp

@@ -139,6 +139,21 @@ void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour);
  * by it. */
 void vidterm_set_logic(uint8_t mode);
 
+/* Get/put buffers: off-screen bitmaps the guest defines by a (group, buffer)
+ * pair of its own choosing. Storage is ours; identity is its. Anything asking
+ * after a buffer that does not exist is accepted and does nothing. */
+void vidterm_buf_define(uint8_t group, uint8_t id, uint32_t len);
+void vidterm_buf_kill(uint8_t group, uint8_t id);
+void vidterm_buf_shape(uint8_t group, uint8_t id, uint16_t xs, uint16_t ys);
+bool vidterm_buf_poke(uint8_t group, uint8_t id, uint32_t at, uint8_t v);
+void vidterm_buf_get(uint8_t group, uint8_t id, int x, int y, int w, int h);
+void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y);
+void vidterm_buf_stats(uint32_t *used, uint32_t *high, unsigned *count);
+
+/* Fill pattern, tiled in SCREEN coordinates so abutting fills line up.
+ * Buffer 0 means none. */
+void vidterm_set_pattern(uint8_t group, uint8_t id);
+
 void vidterm_flood_fill(int x, int y, uint8_t colour);
 void vidterm_fill_stats(uint32_t *overflows);
 void vidterm_clear_graphics(uint8_t colour);

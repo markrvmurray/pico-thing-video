@@ -16,6 +16,7 @@
 #include "video.h"
 #include "video_render.h"
 #include "gfx_shadow.h"
+#include "gfx_bufs.h"
 #include "font_spleen_8x16.h"
 
 /* ───────────────────────── compile-time parameters ──────────────────────── */
@@ -80,6 +81,108 @@ static inline uint8_t attr_to_bg(uint8_t attr)
 static inline uint8_t font_row(uint8_t ch, int row)
 {
     return font_spleen_8x16[ch][row & (CHAR_H - 1)];
+}
+
+/* ──────────────────────── get/put buffers ───────────────────────────────── */
+
+/* Off-screen bitmaps the guest defines and fills, identified by a (group,
+ * buffer) pair it chooses. Both are its namespace, not ours -- we only have
+ * to find them again.
+ *
+ * ALLOCATION IS A BUMP AND A RESET. Storage is handed out in order and a
+ * freed buffer's bytes are not reused until EVERY buffer is freed, at which
+ * point the pool starts again from the beginning. That is a deliberate
+ * refusal to write an allocator: a first-fit free list is a fragmentation
+ * bug waiting for the one guest that allocates and frees in an awkward
+ * order, and there are two megabytes here for buffers measured in kilobytes.
+ * The cost is that a guest cycling buffers forever eventually exhausts the
+ * pool; the count and the high-water mark are reported so that is visible
+ * rather than mysterious. */
+#define GFX_BUF_MAX	32u
+
+struct gfx_buf {
+    bool     used;
+    uint8_t  group, id;
+    uint16_t xsize, ysize;
+    uint32_t offset, len;
+};
+
+static struct gfx_buf gfx_bufs[GFX_BUF_MAX];
+static uint32_t       gfx_pool_used;
+static uint32_t       gfx_pool_high;
+
+static struct gfx_buf *gfx_find(uint8_t group, uint8_t id)
+{
+    for (unsigned i = 0; i < GFX_BUF_MAX; i++)
+        if (gfx_bufs[i].used && gfx_bufs[i].group == group &&
+            gfx_bufs[i].id == id)
+            return &gfx_bufs[i];
+    return NULL;
+}
+
+static uint8_t *gfx_buf_bytes(const struct gfx_buf *b)
+{
+    uint8_t *base = gfx_bufpool_base();
+
+    return (base == NULL || b == NULL) ? NULL : &base[b->offset];
+}
+
+void vidterm_buf_define(uint8_t group, uint8_t id, uint32_t len)
+{
+    struct gfx_buf *b = gfx_find(group, id);
+
+    /* Redefining an existing buffer keeps its storage if the new size fits,
+     * because a guest reusing an id for the same purpose is the common case
+     * and should not consume the pool twice. */
+    if (b != NULL && len <= b->len) {
+        b->len = len;
+        return;
+    }
+    if (b == NULL) {
+        for (unsigned i = 0; i < GFX_BUF_MAX; i++)
+            if (!gfx_bufs[i].used) {
+                b = &gfx_bufs[i];
+                break;
+            }
+    }
+    if (b == NULL || len == 0 || len > GFX_BUFPOOL_BYTES - gfx_pool_used)
+        return;			/* no descriptor, or no room: unanswered */
+
+    b->used = true;
+    b->group = group;
+    b->id = id;
+    b->xsize = 0;
+    b->ysize = 0;
+    b->offset = gfx_pool_used;
+    b->len = len;
+    gfx_pool_used += len;
+    if (gfx_pool_used > gfx_pool_high)
+        gfx_pool_high = gfx_pool_used;
+}
+
+void vidterm_buf_kill(uint8_t group, uint8_t id)
+{
+    struct gfx_buf *b = gfx_find(group, id);
+
+    if (b != NULL)
+        b->used = false;
+
+    for (unsigned i = 0; i < GFX_BUF_MAX; i++)
+        if (gfx_bufs[i].used)
+            return;
+    gfx_pool_used = 0;		/* all gone: the pool starts over */
+}
+
+void vidterm_buf_stats(uint32_t *used, uint32_t *high, unsigned *count)
+{
+    unsigned n = 0;
+
+    for (unsigned i = 0; i < GFX_BUF_MAX; i++)
+        if (gfx_bufs[i].used)
+            n++;
+    *used = gfx_pool_used;
+    *high = gfx_pool_high;
+    *count = n;
 }
 
 /* ───────────────────────── the graphics shadow ──────────────────────────── */
@@ -492,6 +595,24 @@ void vidterm_set_clip(int x, int y, int w, int h)
  * pixel and are several times slower; that is inherent, it is recorded in the
  * protocol document, and it is why normal is zero -- a guest that never sets
  * a mode never pays for one. */
+/* The fill pattern, selected by PSet. When one is set, a filled primitive
+ * takes its colour from the pattern tiled across the plane rather than from
+ * the foreground -- tiled in SCREEN coordinates, so abutting fills line up
+ * instead of each restarting the pattern at its own corner.
+ *
+ * Like the mix modes, a pattern costs the run-based fast path: every pixel
+ * needs its own lookup. Buffer zero means none, which is the default, so
+ * again a guest that asks for nothing pays for nothing. */
+static uint8_t pattern_group, pattern_id;
+static bool    pattern_on;
+
+void vidterm_set_pattern(uint8_t group, uint8_t id)
+{
+    pattern_group = group;
+    pattern_id = id;
+    pattern_on = (id != 0u);
+}
+
 enum { LOGIC_NORMAL = 0, LOGIC_AND = 1, LOGIC_OR = 2, LOGIC_XOR = 3 };
 static uint8_t logic_mode;
 
@@ -501,8 +622,23 @@ void vidterm_set_logic(uint8_t mode)
 }
 
 /* One pixel, in ABSOLUTE coordinates, already known to be inside the clip. */
-static inline void put_pixel_abs(int px, int py, uint8_t colour)
+static inline uint8_t pattern_at(int px, int py, uint8_t fallback)
 {
+    const struct gfx_buf *b;
+    const uint8_t *p;
+
+    if (!pattern_on)
+        return fallback;
+    b = gfx_find(pattern_group, pattern_id);
+    p = gfx_buf_bytes(b);
+    if (p == NULL || b->xsize == 0 || b->ysize == 0)
+        return fallback;
+    return p[(size_t)(py % b->ysize) * b->xsize + (px % b->xsize)];
+}
+
+static inline void put_pixel_abs(int px, int py, uint8_t src)
+{
+    const uint8_t colour = pattern_at(px, py, src);
     uint8_t v = colour;
 
     if (logic_mode != LOGIC_NORMAL) {
@@ -546,7 +682,7 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
      * rectangle is one run of memory rather than one per row. A cleared
      * screen or a full-width bar is the common large fill, and it is the
      * case where the per-row call overhead would be most of what is left. */
-    if (px0 == 0 && px1 == FB_WIDTH && logic_mode == LOGIC_NORMAL) {
+    if (px0 == 0 && px1 == FB_WIDTH && logic_mode == LOGIC_NORMAL && !pattern_on) {
         memset(&video_framebuffer[py0][0], colour,
                span * (size_t)(py1 - py0));
         for (int row = py0; row < py1; row++)
@@ -559,7 +695,7 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
      * whole-panel bar is half a million pixels, and at 33 ms it outlasted a
      * frame on the core that owes the overlay service its deadline. */
     for (int row = py0; row < py1; row++) {
-        if (logic_mode == LOGIC_NORMAL) {
+        if (logic_mode == LOGIC_NORMAL && !pattern_on) {
             memset(&video_framebuffer[row][px0], colour, span);
             shadow_fill_span(px0, px1, row, colour);
         } else {
@@ -577,7 +713,7 @@ void vidterm_hline(int x, int y, int len, uint8_t colour)
     int px1 = origin_x + x + len; if (px1 > clip_x1) px1 = clip_x1;
     if (px1 <= px0)
         return;
-    if (logic_mode == LOGIC_NORMAL) {
+    if (logic_mode == LOGIC_NORMAL && !pattern_on) {
         memset(&video_framebuffer[py][px0], colour, (size_t)(px1 - px0));
         shadow_fill_span(px0, px1, py, colour);
     } else {
@@ -718,6 +854,68 @@ void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
 
         vidterm_hline(cx - dx, cy + dy, 2 * dx + 1, colour);
     }
+}
+
+/* Record a loaded bitmap's shape and take its bytes. The payload arrives a
+ * byte at a time as the link drains it, so this appends rather than copies a
+ * block -- there is nowhere to assemble one first. */
+void vidterm_buf_shape(uint8_t group, uint8_t id, uint16_t xs, uint16_t ys)
+{
+    struct gfx_buf *b = gfx_find(group, id);
+
+    if (b != NULL) {
+        b->xsize = xs;
+        b->ysize = ys;
+    }
+}
+
+bool vidterm_buf_poke(uint8_t group, uint8_t id, uint32_t at, uint8_t v)
+{
+    struct gfx_buf *b = gfx_find(group, id);
+    uint8_t *p = gfx_buf_bytes(b);
+
+    if (p == NULL || at >= b->len)
+        return false;
+    p[at] = v;
+    return true;
+}
+
+/* GetBlk: a rectangle of the GRAPHICS plane into a buffer. The graphics
+ * plane rather than the framebuffer, for the same reason the mix modes read
+ * it -- a guest saving a region means the drawing, not whatever text is
+ * sitting on top of it at the time. */
+void vidterm_buf_get(uint8_t group, uint8_t id, int x, int y, int w, int h)
+{
+    struct gfx_buf *b = gfx_find(group, id);
+    uint8_t *p = gfx_buf_bytes(b);
+
+    if (p == NULL || w <= 0 || h <= 0)
+        return;
+    if ((uint32_t)w * (uint32_t)h > b->len)
+        return;			/* would not fit: unanswered */
+
+    b->xsize = (uint16_t)w;
+    b->ysize = (uint16_t)h;
+    for (int row = 0; row < h; row++)
+        for (int col = 0; col < w; col++)
+            p[(size_t)row * w + col] =
+                shadow_peek(origin_x + x + col, origin_y + y + row);
+}
+
+/* PutBlk: a buffer back onto the screen, honouring the clip and the mix mode
+ * exactly as a primitive does -- it IS drawing, and a guest that has set XOR
+ * expects a stamped block to obey it. */
+void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y)
+{
+    const struct gfx_buf *b = gfx_find(group, id);
+    const uint8_t *p = gfx_buf_bytes(b);
+
+    if (p == NULL || b->xsize == 0 || b->ysize == 0)
+        return;
+    for (int row = 0; row < b->ysize; row++)
+        for (int col = 0; col < b->xsize; col++)
+            plot_unlocked(x + col, y + row,
+                          p[(size_t)row * b->xsize + col]);
 }
 
 /* ───────────────────────────── flood fill ───────────────────────────────── */

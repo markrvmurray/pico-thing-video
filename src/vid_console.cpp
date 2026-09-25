@@ -104,6 +104,9 @@ static uint8_t  esc_need;		/* params still to collect */
 static uint8_t  esc_buf[12];		/* largest fixed count: Arc */
 static uint8_t  esc_have;
 static uint16_t esc_skip;		/* GPLoad payload countdown */
+static uint8_t  load_group, load_id;	/* the buffer that payload is filling */
+static uint32_t load_at;		/* how far into it we are */
+static bool     load_ok;		/* header understood; otherwise drop */
 
 /* ── graphics state ── */
 static int      dp_x, dp_y;		/* the draw pointer */
@@ -632,6 +635,23 @@ esc_exec(void)
 		}
 		break;
 	}
+	case 0x29u:			/* DefGPB: group, buffer, len */
+		vidterm_buf_define(esc_buf[0], esc_buf[1],
+		    (uint32_t)p16(2));
+		break;
+	case 0x2Au:			/* KillBuf: group, buffer */
+		vidterm_buf_kill(esc_buf[0], esc_buf[1]);
+		break;
+	case 0x2Cu:			/* GetBlk: group, buffer, x, y, w, h */
+		vidterm_buf_get(esc_buf[0], esc_buf[1], p16(2), p16(4),
+		    p16(6), p16(8));
+		break;
+	case 0x2Du:			/* PutBlk: group, buffer, x, y */
+		vidterm_buf_put(esc_buf[0], esc_buf[1], p16(2), p16(4));
+		break;
+	case 0x2Eu:			/* PSet: group, buffer — fill pattern */
+		vidterm_set_pattern(esc_buf[0], esc_buf[1]);
+		break;
 	case 0x2Fu:			/* LSet: raster mix mode, persists */
 		/* Applies to the GUEST's drawing only. Text is left alone:
 		 * a console whose glyphs XORed with the screen would be
@@ -673,7 +693,21 @@ esc_exec(void)
 		vidterm_pointer_set(win_col0 * CHAR_W + p16(0),
 		    win_row0 * CHAR_H + p16(2));
 		break;
-	case 0x2Bu:			/* GPLoad: swallow the streamed payload */
+	case 0x2Bu:			/* GPLoad: header, then bufSize bytes */
+		/* screenType 1 is the only defined layout: raw RGB332,
+		 * row-major, no padding. Zero is reserved precisely so an
+		 * all-zero or truncated header is rejected here rather than
+		 * rendered as whatever it happens to contain. The payload is
+		 * still counted and swallowed either way, because the byte
+		 * stream has to stay in step whatever we think of the
+		 * header. */
+		load_group = esc_buf[0];
+		load_id = esc_buf[1];
+		load_ok = (esc_buf[2] == 1u);
+		load_at = 0u;
+		if (load_ok)
+			vidterm_buf_shape(load_group, load_id,
+			    (uint16_t)p16(3), (uint16_t)p16(5));
 		esc_skip = (uint16_t)p16(7);
 		if (esc_skip > 0u)
 			state = ST_ESC_SKIP;
@@ -748,6 +782,13 @@ vid_link_consume(uint8_t b)
 		}
 		return;
 	case ST_ESC_SKIP:
+		/* GPLoad's payload. Taken into the buffer when the header was
+		 * one we understood, counted and dropped when it was not --
+		 * the stream stays in step either way, which is the whole
+		 * reason the length is in the header. */
+		if (load_ok)
+			(void)vidterm_buf_poke(load_group, load_id,
+			    load_at++, b);
 		if (--esc_skip == 0u)
 			state = ST_NORMAL;
 		return;
@@ -886,5 +927,6 @@ vid_link_consume_reset(void)
 	dp_x = 0;
 	dp_y = 0;
 	vidterm_set_logic(0u);		/* replace: the mode nobody pays for */
+	vidterm_set_pattern(0u, 0u);	/* and no fill pattern */
 	default_palette();
 }
