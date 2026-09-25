@@ -452,10 +452,32 @@ blit_char_cell(int col, int row)
          * mask once and filling beats testing it once per pixel: eight
          * branches and eight byte stores become one run. */
         if (mask == 0x00) {
+            /* A blank cell restores the graphics under it. The row may not
+             * have been materialised -- most of the plane never is, that
+             * being the point -- in which case the answer is the uniform
+             * colour, not a read from a null row.
+             *
+             * This tested shadow_any_real and dereferenced the row pointer
+             * regardless, so a blank cell in an UNMATERIALISED row while
+             * some OTHER row was real read from &((uint8_t *)0)[x]: address
+             * x, which is 0 to 1016, which is the bootrom. It rendered
+             * bootrom bytes into the framebuffer as pixels -- a block of
+             * unrelated-looking content, only in the regions where no
+             * graphics had been drawn, and only in cells that text had
+             * touched. Precisely the shape of corruption reported from
+             * hardware.
+             *
+             * No test caught it because a test either clears and draws
+             * nothing (no row real, so the safe branch) or draws over what
+             * it checks (the row real). It needs a screen that is part
+             * drawn and part not, which is every real screen and no
+             * contrived one. */
+            const uint8_t *src = transparent ? shadow_row_ro(y + gy) : NULL;
+
             if (!transparent)
                 fill_cell_row(line, bg);
-            else if (shadow_any_real)
-                memcpy(line, &shadow_row_ro(y + gy)[x], CHAR_W);
+            else if (src != NULL)
+                memcpy(line, &src[x], CHAR_W);
             else
                 fill_cell_row(line, shadow_uniform_colour);
             continue;
