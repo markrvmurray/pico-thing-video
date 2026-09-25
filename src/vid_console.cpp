@@ -34,7 +34,12 @@
 /* White foreground on an OPAQUE black background: console overwrites and
  * scrolls must erase what was under them. (Transparent attrs are for the
  * M3+ text-over-graphics modes.) */
-#define CONSOLE_ATTR  0xE0u
+/* White on TRANSPARENT. Transparent no longer means "skip the pixel" -- the
+ * renderer restores the graphics plane there instead -- so text erases
+ * correctly and whatever is drawn underneath shows through the gaps in each
+ * glyph. Opaque black was hiding graphics, and doing it so thoroughly that a
+ * correctly drawn box once looked like a broken feature. */
+#define CONSOLE_ATTR  0xE1u
 
 /* Multi-byte control sequences ($02 x y cursor position, $05 arg cursor
  * on/off) collect their parameter bytes through this little machine. */

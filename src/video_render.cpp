@@ -15,6 +15,7 @@
 
 #include "video.h"
 #include "video_render.h"
+#include "gfx_shadow.h"
 #include "font_spleen_8x16.h"
 
 /* ───────────────────────── compile-time parameters ──────────────────────── */
@@ -81,6 +82,92 @@ static inline uint8_t font_row(uint8_t ch, int row)
     return font_spleen_8x16[ch][row & (CHAR_H - 1)];
 }
 
+/* ───────────────────────── the graphics shadow ──────────────────────────── */
+
+/* What the framebuffer would hold with no text on it, so transparent text can
+ * ERASE by restoring what was underneath rather than by painting a background.
+ *
+ * Most of it is usually one colour, and writing half a megabyte to PSRAM costs
+ * about 9 ms, so the flat part is kept IMPLICIT: a uniform colour plus a
+ * per-row flag saying which rows have been made real. A clear sets the colour
+ * and clears every flag -- no bytes move at all. A row becomes real the first
+ * time a primitive draws into it, and only that row is filled.
+ *
+ * This is what stops transparency costing a frame per clear. The alternative,
+ * maintaining the plane literally, would have put a clear back over its
+ * budget the day after that budget was finally met. */
+static uint8_t  shadow_uniform_colour;
+static bool     shadow_row_real[FB_HEIGHT];
+static bool     shadow_any_real;
+
+static inline uint8_t *shadow_row(int y)
+{
+    uint8_t *base = gfx_shadow_base();
+
+    if (base == NULL)
+        return NULL;
+    if (!shadow_row_real[y]) {
+        memset(&base[(size_t)y * FB_WIDTH], shadow_uniform_colour, FB_WIDTH);
+        shadow_row_real[y] = true;
+        shadow_any_real = true;
+    }
+    return &base[(size_t)y * FB_WIDTH];
+}
+
+/* The row as it stands, without making it real. Only valid when some row IS
+ * real; callers check shadow_any_real first. */
+static inline const uint8_t *shadow_row_ro(int y)
+{
+    const uint8_t *base = gfx_shadow_base();
+
+    return (base != NULL && shadow_row_real[y]) ?
+        &base[(size_t)y * FB_WIDTH] : NULL;
+}
+
+/* Read one pixel of the shadow. The common answer needs no memory access at
+ * all, which is the point: a screen of text over a plain background asks this
+ * question half a million times and gets the uniform colour every time. */
+static inline uint8_t shadow_peek(int x, int y)
+{
+    const uint8_t *base;
+
+    if (!shadow_any_real || !shadow_row_real[y])
+        return shadow_uniform_colour;
+    base = gfx_shadow_base();
+    return base == NULL ? shadow_uniform_colour : base[(size_t)y * FB_WIDTH + x];
+}
+
+/* Everything the guest draws goes to both planes: the framebuffer, which is
+ * what the display reads, and the shadow, which is what erasing text restores
+ * from. Text does NOT come here -- that is the whole distinction. */
+static inline void shadow_poke(int x, int y, uint8_t colour)
+{
+    uint8_t *row = shadow_row(y);
+
+    if (row != NULL)
+        row[x] = colour;
+}
+
+static void shadow_fill_span(int x0, int x1, int y, uint8_t colour)
+{
+    uint8_t *row;
+
+    if (x1 <= x0)
+        return;
+    /* A span covering the whole width makes the row uniform again in its own
+     * right, but tracking that per row buys little -- fill it. */
+    row = shadow_row(y);
+    if (row != NULL)
+        memset(&row[x0], colour, (size_t)(x1 - x0));
+}
+
+void vidterm_shadow_reset(uint8_t colour)
+{
+    shadow_uniform_colour = colour;
+    memset(shadow_row_real, 0, sizeof(shadow_row_real));
+    shadow_any_real = false;
+}
+
 /* ────────────────────── text cell rendering (blitting) ──────────────────── */
 
 /* A glyph row is exactly CHAR_W bytes and starts CHAR_W-aligned, so it is two
@@ -109,10 +196,19 @@ blit_char_cell(int col, int row)
 
     uint8_t fg = attr_to_fg(attr);
     uint8_t bg = attr_to_bg(attr);
-    /* Transparency is the attr's bit0 flag, NOT a colour sentinel: opaque
-     * black (attr bg bits 000, bit0 clear) must paint its background,
-     * or glyph overwrites and scrolls leave ghosts of the old pixels. */
-    bool transparent = (attr & 0x01) != 0;
+    /* Transparency is the attr's bit0 flag, NOT a colour sentinel.
+     *
+     * It used to mean "leave the pixel alone", which is why the console could
+     * not use it: nothing erased, so an overwritten glyph left its strokes
+     * behind. It now means "put back what the graphics plane has there",
+     * which erases correctly AND lets whatever was drawn underneath show
+     * through the gaps in the glyph. That is the whole of VID-025.
+     *
+     * With no shadow storage there is nothing to put back, so the cell falls
+     * back to painting its background -- text hides graphics exactly as it
+     * always did, rather than ghosting. Degrading to the old behaviour beats
+     * degrading to a broken one. */
+    bool transparent = (attr & 0x01) != 0 && gfx_shadow_base() != NULL;
 
     int x = col * CHAR_W;
     int y = row * CHAR_H;
@@ -130,6 +226,10 @@ blit_char_cell(int col, int row)
         if (mask == 0x00) {
             if (!transparent)
                 fill_cell_row(line, bg);
+            else if (shadow_any_real)
+                memcpy(line, &shadow_row_ro(y + gy)[x], CHAR_W);
+            else
+                fill_cell_row(line, shadow_uniform_colour);
             continue;
         }
         if (mask == 0xFF) {
@@ -140,11 +240,12 @@ blit_char_cell(int col, int row)
         for (int gx = 0; gx < CHAR_W; gx++) {
             bool is_fg = (mask & (0x80 >> gx)) != 0;
 
-            if (is_fg) {
+            if (is_fg)
                 line[gx] = fg;
-            } else if (!transparent) {
+            else if (!transparent)
                 line[gx] = bg;
-            }
+            else
+                line[gx] = shadow_peek(x + gx, y + gy);
         }
     }
 }
@@ -379,8 +480,10 @@ void vidterm_set_clip(int x, int y, int w, int h)
 static inline void plot_unlocked(int x, int y, uint8_t colour)
 {
     const int px = origin_x + x, py = origin_y + y;
-    if (px >= clip_x0 && px < clip_x1 && py >= clip_y0 && py < clip_y1)
+    if (px >= clip_x0 && px < clip_x1 && py >= clip_y0 && py < clip_y1) {
         video_framebuffer[py][px] = colour;
+        shadow_poke(px, py, colour);
+    }
 }
 
 void vidterm_plot(int x, int y, uint8_t colour)
@@ -407,6 +510,8 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
     if (px0 == 0 && px1 == FB_WIDTH) {
         memset(&video_framebuffer[py0][0], colour,
                span * (size_t)(py1 - py0));
+        for (int row = py0; row < py1; row++)
+            shadow_fill_span(0, FB_WIDTH, row, colour);
         return;
     }
 
@@ -414,8 +519,10 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
      * four times this: the fill is the largest thing the renderer does, a
      * whole-panel bar is half a million pixels, and at 33 ms it outlasted a
      * frame on the core that owes the overlay service its deadline. */
-    for (int row = py0; row < py1; row++)
+    for (int row = py0; row < py1; row++) {
         memset(&video_framebuffer[row][px0], colour, span);
+        shadow_fill_span(px0, px1, row, colour);
+    }
 }
 
 void vidterm_hline(int x, int y, int len, uint8_t colour)
@@ -424,8 +531,10 @@ void vidterm_hline(int x, int y, int len, uint8_t colour)
     if (py < clip_y0 || py >= clip_y1) return;
     int px0 = origin_x + x; if (px0 < clip_x0) px0 = clip_x0;
     int px1 = origin_x + x + len; if (px1 > clip_x1) px1 = clip_x1;
-    if (px1 > px0)
+    if (px1 > px0) {
         memset(&video_framebuffer[py][px0], colour, (size_t)(px1 - px0));
+        shadow_fill_span(px0, px1, py, colour);
+    }
 }
 
 void vidterm_vline(int x, int y, int len, uint8_t colour)
@@ -434,8 +543,10 @@ void vidterm_vline(int x, int y, int len, uint8_t colour)
     if (px < clip_x0 || px >= clip_x1) return;
     int py0 = origin_y + y; if (py0 < clip_y0) py0 = clip_y0;
     int py1 = origin_y + y + len; if (py1 > clip_y1) py1 = clip_y1;
-    for (int i = py0; i < py1; i++)
+    for (int i = py0; i < py1; i++) {
         video_framebuffer[i][px] = colour;
+        shadow_poke(px, i, colour);
+    }
 }
 
 void vidterm_line(int x0, int y0, int x1, int y1, uint8_t colour)
@@ -460,6 +571,10 @@ void vidterm_line(int x0, int y0, int x1, int y1, uint8_t colour)
 void vidterm_clear_graphics(uint8_t colour)
 {
     memset(video_framebuffer, colour, sizeof(video_framebuffer));
+    /* The shadow becomes that colour everywhere WITHOUT being written: the
+     * uniform state is exactly this case, and it is the one that would
+     * otherwise cost 9 ms of PSRAM traffic on every clear. */
+    vidterm_shadow_reset(colour);
 }
 
 void vidterm_circle(int cx, int cy, int radius, uint8_t colour)
