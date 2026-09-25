@@ -763,6 +763,23 @@ void vidterm_set_clip(int x, int y, int w, int h)
  * and did not. */
 #define PATTERN_CACHE_BYTES	256u	/* a 16x16 weave, the usual size */
 
+/* A pattern applies to FILLED primitives and to nothing else -- Bar, the
+ * filled curves, FFill. Not to a point, a line, an outline, or a stamped
+ * block, all of which carry their own colour and mean it.
+ *
+ * This was applied in the single pixel writer that every primitive goes
+ * through, so it replaced the colour of everything: lines and outlines came
+ * out woven, and PutBlk stamped the pattern instead of the image it was given.
+ * From the screen that reads as a patch of pattern with no relation to what
+ * surrounds it -- which is how it was reported. Meanwhile FFill, which the
+ * contract says IS patterned, was the one fill that missed out, because it
+ * writes spans directly rather than through the writer.
+ *
+ * Inverted in both directions at once, which is what comes of putting a
+ * decision in the place everything passes through rather than in the places
+ * that mean it. */
+static bool          fill_patterned;
+
 static uint8_t       pattern_cache[PATTERN_CACHE_BYTES];
 static const uint8_t *pattern_data;	/* cache, or straight into PSRAM */
 static int           pattern_w, pattern_h;
@@ -806,7 +823,7 @@ void vidterm_set_logic(uint8_t mode)
 /* One pixel, in ABSOLUTE coordinates, already known to be inside the clip. */
 static inline uint8_t pattern_at(int px, int py, uint8_t fallback)
 {
-    if (!pattern_on)
+    if (!fill_patterned)
         return fallback;
     return pattern_data[(size_t)(py % pattern_h) * pattern_w +
                         (px % pattern_w)];
@@ -854,15 +871,18 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
 
     const size_t span = (size_t)(px1 - px0);
 
+    fill_patterned = pattern_on;
+
     /* Full-width spans are contiguous in the framebuffer, so the whole
      * rectangle is one run of memory rather than one per row. A cleared
      * screen or a full-width bar is the common large fill, and it is the
      * case where the per-row call overhead would be most of what is left. */
-    if (px0 == 0 && px1 == FB_WIDTH && logic_mode == LOGIC_NORMAL && !pattern_on) {
+    if (px0 == 0 && px1 == FB_WIDTH && logic_mode == LOGIC_NORMAL && !fill_patterned) {
         memset(&video_framebuffer[py0][0], colour,
                span * (size_t)(py1 - py0));
         for (int row = py0; row < py1; row++)
             shadow_fill_span(0, FB_WIDTH, row, colour);
+        fill_patterned = false;
         return;
     }
 
@@ -871,7 +891,7 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
      * whole-panel bar is half a million pixels, and at 33 ms it outlasted a
      * frame on the core that owes the overlay service its deadline. */
     for (int row = py0; row < py1; row++) {
-        if (logic_mode == LOGIC_NORMAL && !pattern_on) {
+        if (logic_mode == LOGIC_NORMAL && !fill_patterned) {
             memset(&video_framebuffer[row][px0], colour, span);
             shadow_fill_span(px0, px1, row, colour);
         } else {
@@ -879,6 +899,7 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
                 put_pixel_abs(i, row, colour);
         }
     }
+    fill_patterned = false;
 }
 
 void vidterm_hline(int x, int y, int len, uint8_t colour)
@@ -889,7 +910,7 @@ void vidterm_hline(int x, int y, int len, uint8_t colour)
     int px1 = origin_x + x + len; if (px1 > clip_x1) px1 = clip_x1;
     if (px1 <= px0)
         return;
-    if (logic_mode == LOGIC_NORMAL && !pattern_on) {
+    if (logic_mode == LOGIC_NORMAL && !fill_patterned) {
         memset(&video_framebuffer[py][px0], colour, (size_t)(px1 - px0));
         shadow_fill_span(px0, px1, py, colour);
     } else {
@@ -1021,6 +1042,12 @@ void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
         return;
     }
 
+    /* A fill, so the pattern applies -- and it must be set around the whole
+     * shape rather than per span, or each row would decide separately. */
+    const bool was = fill_patterned;
+
+    fill_patterned = pattern_on;
+
     for (int dy = -ry; dy <= ry; dy++) {
         /* half-width = rx * sqrt(ry^2 - dy^2) / ry, kept in integers. The
          * square root is taken of a value no larger than ry^2, so the
@@ -1030,6 +1057,7 @@ void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
 
         vidterm_hline(cx - dx, cy + dy, 2 * dx + 1, colour);
     }
+    fill_patterned = was;
 }
 
 /* Record a loaded bitmap's shape and take its bytes. The payload arrives a
@@ -1138,6 +1166,14 @@ void vidterm_fill_stats(uint32_t *overflows)
 
 static inline void fill_span_abs(int px0, int px1, int py, uint8_t colour)
 {
+    /* A flood fill IS a fill, so it takes the pattern -- and it used to be
+     * the one that did not, because it writes spans straight out rather than
+     * through the pixel writer. */
+    if (fill_patterned || logic_mode != LOGIC_NORMAL) {
+        for (int i = px0; i < px1; i++)
+            put_pixel_abs(i, py, colour);
+        return;
+    }
     memset(&video_framebuffer[py][px0], colour, (size_t)(px1 - px0));
     shadow_fill_span(px0, px1, py, colour);
 }
@@ -1157,6 +1193,8 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
      * again forever. */
     if (target == colour)
         return;
+
+    fill_patterned = pattern_on;
 
     unsigned sp = 0;
     fill_stack[sp].x = (int16_t)sx;
@@ -1205,6 +1243,7 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
             }
         }
     }
+    fill_patterned = false;
 }
 
 void vidterm_circle(int cx, int cy, int radius, uint8_t colour)
