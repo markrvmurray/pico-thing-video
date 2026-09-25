@@ -134,6 +134,13 @@ static volatile uint32_t isr_write_calls;
 #define ISR_TAIL_NS	500u		// half a microsecond
 static uint32_t isr_tail_cy;		// ISR_TAIL_NS converted, set at enable
 static volatile uint32_t isr_read_over;
+
+// Stale-service detection: the previous handler's entry time and duration, and
+// how often a read arrived before the previous restage had finished.
+static uint32_t          isr_read_prev_in;
+static uint32_t          isr_read_prev_dt;
+static volatile uint32_t isr_read_stale;
+static volatile uint32_t isr_read_stale_worst;
 static volatile uint32_t isr_write_over;
 
 // MUST BE CALLED ON THE CORE BEING MEASURED. The DWT is a per-core debug
@@ -185,6 +192,35 @@ __time_critical_func(dma_bus_read_irq_handler())
 		isr_read_max = dt;
 	if (dt > isr_tail_cy)
 		isr_read_over = isr_read_over + 1u;
+
+	// DID WE SERVE A STALE BYTE? This is the failure the ISR's duration
+	// only hints at. The DMA hands the guest whatever is staged the moment
+	// !CS asserts; this handler then advances and restages behind it. If
+	// the next read arrives before that finished, the guest was given the
+	// byte it had already taken -- and on a 6809 a stale fetch is a wild
+	// PC, which looks like the guest crashing of its own accord long
+	// afterwards.
+	//
+	// The test is the interval between consecutive handler entries against
+	// how long the previous one took. Closer together than that, and the
+	// restage had not completed when the next cycle was served.
+	//
+	// It cannot happen at 1 MHz with a healthy handler: reads are at least
+	// a microsecond apart and the handler takes 0.4 us at worst. So a
+	// non-zero count here is not a tight margin, it is proof that
+	// something stalled this core long enough to miss a bus cycle -- which
+	// is exactly what a hang with no other explanation needs.
+	if (isr_read_prev_in != 0u) {
+		const uint32_t gap = t_in - isr_read_prev_in;
+
+		if (gap < isr_read_prev_dt) {
+			isr_read_stale = isr_read_stale + 1u;
+			if (gap < isr_read_stale_worst || isr_read_stale == 1u)
+				isr_read_stale_worst = gap;
+		}
+	}
+	isr_read_prev_in = t_in | 1u;	/* never zero: 0 means "no previous" */
+	isr_read_prev_dt = dt;
 }
 
 // ISR for the R/!W bus write loop and DMA chain.
@@ -641,6 +677,14 @@ bus_engine_print_status(void)
 		       (unsigned long)isr[i].over, (unsigned long)n,
 		       (unsigned long)ppm);
 	}
+	// Silence is the expected reading, so this line only appears when it
+	// is not silent. A stale service is not a margin to watch, it is a
+	// byte the guest was handed twice.
+	if (isr_read_stale != 0u)
+		printf("Bus ISR read : STALE SERVICE x%lu — closest pair %lu cy"
+		       " apart; the guest was served a byte twice\n",
+		       (unsigned long)isr_read_stale,
+		       (unsigned long)isr_read_stale_worst);
 	printf("Last write:  %02X  last read: %02X\n",
 	       core1_last_write_loc, core1_last_read_loc);
 	printf("Guest reads: FF10=%lu FF11=%lu (others %lu)\n",
