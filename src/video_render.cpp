@@ -477,13 +477,52 @@ void vidterm_set_clip(int x, int y, int w, int h)
     clip_y1 = (y + h > FB_HEIGHT) ? FB_HEIGHT : y + h;
 }
 
+/* The raster mix mode, set by the guest and persisting until changed. Normal
+ * replaces; the others combine what is being drawn with what is already
+ * there.
+ *
+ * WHAT "ALREADY THERE" MEANS is the graphics plane, NOT the framebuffer. The
+ * framebuffer may have text on it, and a guest XORing a line across a window
+ * full of characters means to combine with the drawing underneath them, not
+ * with the glyphs. Reading the shadow keeps graphics operations independent
+ * of whatever text happens to be on screen -- which is the same separation
+ * that lets text be transparent in the first place.
+ *
+ * Only normal can use run-based drawing. The others are read-modify-write per
+ * pixel and are several times slower; that is inherent, it is recorded in the
+ * protocol document, and it is why normal is zero -- a guest that never sets
+ * a mode never pays for one. */
+enum { LOGIC_NORMAL = 0, LOGIC_AND = 1, LOGIC_OR = 2, LOGIC_XOR = 3 };
+static uint8_t logic_mode;
+
+void vidterm_set_logic(uint8_t mode)
+{
+    logic_mode = (mode <= LOGIC_XOR) ? mode : LOGIC_NORMAL;
+}
+
+/* One pixel, in ABSOLUTE coordinates, already known to be inside the clip. */
+static inline void put_pixel_abs(int px, int py, uint8_t colour)
+{
+    uint8_t v = colour;
+
+    if (logic_mode != LOGIC_NORMAL) {
+        const uint8_t base = shadow_peek(px, py);
+
+        switch (logic_mode) {
+        case LOGIC_AND: v = base & colour; break;
+        case LOGIC_OR:  v = base | colour; break;
+        default:        v = base ^ colour; break;
+        }
+    }
+    video_framebuffer[py][px] = v;
+    shadow_poke(px, py, v);
+}
+
 static inline void plot_unlocked(int x, int y, uint8_t colour)
 {
     const int px = origin_x + x, py = origin_y + y;
-    if (px >= clip_x0 && px < clip_x1 && py >= clip_y0 && py < clip_y1) {
-        video_framebuffer[py][px] = colour;
-        shadow_poke(px, py, colour);
-    }
+    if (px >= clip_x0 && px < clip_x1 && py >= clip_y0 && py < clip_y1)
+        put_pixel_abs(px, py, colour);
 }
 
 void vidterm_plot(int x, int y, uint8_t colour)
@@ -507,7 +546,7 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
      * rectangle is one run of memory rather than one per row. A cleared
      * screen or a full-width bar is the common large fill, and it is the
      * case where the per-row call overhead would be most of what is left. */
-    if (px0 == 0 && px1 == FB_WIDTH) {
+    if (px0 == 0 && px1 == FB_WIDTH && logic_mode == LOGIC_NORMAL) {
         memset(&video_framebuffer[py0][0], colour,
                span * (size_t)(py1 - py0));
         for (int row = py0; row < py1; row++)
@@ -520,8 +559,13 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
      * whole-panel bar is half a million pixels, and at 33 ms it outlasted a
      * frame on the core that owes the overlay service its deadline. */
     for (int row = py0; row < py1; row++) {
-        memset(&video_framebuffer[row][px0], colour, span);
-        shadow_fill_span(px0, px1, row, colour);
+        if (logic_mode == LOGIC_NORMAL) {
+            memset(&video_framebuffer[row][px0], colour, span);
+            shadow_fill_span(px0, px1, row, colour);
+        } else {
+            for (int i = px0; i < px1; i++)
+                put_pixel_abs(i, row, colour);
+        }
     }
 }
 
@@ -531,9 +575,14 @@ void vidterm_hline(int x, int y, int len, uint8_t colour)
     if (py < clip_y0 || py >= clip_y1) return;
     int px0 = origin_x + x; if (px0 < clip_x0) px0 = clip_x0;
     int px1 = origin_x + x + len; if (px1 > clip_x1) px1 = clip_x1;
-    if (px1 > px0) {
+    if (px1 <= px0)
+        return;
+    if (logic_mode == LOGIC_NORMAL) {
         memset(&video_framebuffer[py][px0], colour, (size_t)(px1 - px0));
         shadow_fill_span(px0, px1, py, colour);
+    } else {
+        for (int i = px0; i < px1; i++)
+            put_pixel_abs(i, py, colour);
     }
 }
 
@@ -543,10 +592,8 @@ void vidterm_vline(int x, int y, int len, uint8_t colour)
     if (px < clip_x0 || px >= clip_x1) return;
     int py0 = origin_y + y; if (py0 < clip_y0) py0 = clip_y0;
     int py1 = origin_y + y + len; if (py1 > clip_y1) py1 = clip_y1;
-    for (int i = py0; i < py1; i++) {
-        video_framebuffer[i][px] = colour;
-        shadow_poke(px, i, colour);
-    }
+    for (int i = py0; i < py1; i++)
+        put_pixel_abs(px, i, colour);
 }
 
 void vidterm_line(int x0, int y0, int x1, int y1, uint8_t colour)

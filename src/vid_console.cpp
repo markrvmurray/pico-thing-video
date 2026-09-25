@@ -632,6 +632,15 @@ esc_exec(void)
 		}
 		break;
 	}
+	case 0x2Fu:			/* LSet: raster mix mode, persists */
+		/* Applies to the GUEST's drawing only. Text is left alone:
+		 * a console whose glyphs XORed with the screen would be
+		 * unreadable, and the transparent-background path already
+		 * has a defined relationship with the graphics plane that a
+		 * mix mode would contradict. Recorded as a divergence so the
+		 * protocol document can say so. */
+		vidterm_set_logic(esc_buf[0]);
+		break;
 	case 0x4Fu:			/* FFill: flood from the draw pointer */
 		vidterm_flood_fill(dp_x, dp_y, fg);
 		break;
@@ -876,5 +885,6 @@ vid_link_consume_reset(void)
 	dirty = false;
 	dp_x = 0;
 	dp_y = 0;
+	vidterm_set_logic(0u);		/* replace: the mode nobody pays for */
 	default_palette();
 }

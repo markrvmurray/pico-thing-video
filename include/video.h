@@ -133,6 +133,12 @@ void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour);
  * colour and by the clip rectangle. The seed stack is finite; see the note in
  * video_render.cpp for what happens when it runs out, and vidterm_fill_stats()
  * for whether it ever has. */
+/* Raster mix mode for the GUEST's drawing: 0 replace, 1 AND, 2 OR, 3 XOR.
+ * Combines against the graphics plane rather than the framebuffer, so an
+ * operation means the same whatever text is on screen. Text is not affected
+ * by it. */
+void vidterm_set_logic(uint8_t mode);
+
 void vidterm_flood_fill(int x, int y, uint8_t colour);
 void vidterm_fill_stats(uint32_t *overflows);
 void vidterm_clear_graphics(uint8_t colour);
