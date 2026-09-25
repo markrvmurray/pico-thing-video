@@ -301,9 +301,27 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
     int py0 = origin_y + y; if (py0 < clip_y0) py0 = clip_y0;
     int px1 = origin_x + x + w; if (px1 > clip_x1) px1 = clip_x1;
     int py1 = origin_y + y + h; if (py1 > clip_y1) py1 = clip_y1;
+    if (px1 <= px0 || py1 <= py0)
+        return;
+
+    const size_t span = (size_t)(px1 - px0);
+
+    /* Full-width spans are contiguous in the framebuffer, so the whole
+     * rectangle is one run of memory rather than one per row. A cleared
+     * screen or a full-width bar is the common large fill, and it is the
+     * case where the per-row call overhead would be most of what is left. */
+    if (px0 == 0 && px1 == FB_WIDTH) {
+        memset(&video_framebuffer[py0][0], colour,
+               span * (size_t)(py1 - py0));
+        return;
+    }
+
+    /* Otherwise one run per row. A byte-at-a-time loop was costing about
+     * four times this: the fill is the largest thing the renderer does, a
+     * whole-panel bar is half a million pixels, and at 33 ms it outlasted a
+     * frame on the core that owes the overlay service its deadline. */
     for (int row = py0; row < py1; row++)
-        for (int i = px0; i < px1; i++)
-            video_framebuffer[row][i] = colour;
+        memset(&video_framebuffer[row][px0], colour, span);
 }
 
 void vidterm_hline(int x, int y, int len, uint8_t colour)
@@ -312,8 +330,8 @@ void vidterm_hline(int x, int y, int len, uint8_t colour)
     if (py < clip_y0 || py >= clip_y1) return;
     int px0 = origin_x + x; if (px0 < clip_x0) px0 = clip_x0;
     int px1 = origin_x + x + len; if (px1 > clip_x1) px1 = clip_x1;
-    for (int i = px0; i < px1; i++)
-        video_framebuffer[py][i] = colour;
+    if (px1 > px0)
+        memset(&video_framebuffer[py][px0], colour, (size_t)(px1 - px0));
 }
 
 void vidterm_vline(int x, int y, int len, uint8_t colour)
