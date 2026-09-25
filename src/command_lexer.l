@@ -79,6 +79,7 @@ match_command_keyword(const char *text)
 		{ "power",   "pw", TOK_POWER   },
 		{ "verbose", "vb", TOK_VERBOSE },
 		{ "flood",   "fl", TOK_FLOOD   },
+		{ "priority","pr", TOK_PRIORITY},
 		{ "status",  "st", TOK_STATUS  },
 		{ "examine", "ex", TOK_EXAMINE },
 		{ "modify",  "mo", TOK_MODIFY  },

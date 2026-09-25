@@ -270,7 +270,7 @@ static void hstx_dvi_init(void)
     irq_set_priority(VIDEO_DMA_IRQ, 0);
     irq_set_enabled(VIDEO_DMA_IRQ, true);
 
-    bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
+    video_set_dma_priority(true);
 
 #if VIDEO_SCANOUT_OFF
     /* Measurement build: everything above is configured but never started, so
@@ -282,6 +282,33 @@ static void hstx_dvi_init(void)
 #else
     dma_channel_start(DMACH_PING);
 #endif
+}
+
+/* ─────────────────────── SRAM crossbar priority ─────────────────────────── */
+
+/* Who wins when a core and a DMA want the same SRAM bank in the same cycle.
+ * Scan-out has had absolute priority since bring-up, on the reasoning that it
+ * owes a hard per-scanline deadline -- but it consumes about 38 MB/s of a bus
+ * good for well over a gigabyte, and the cost of that choice turns out to be
+ * large: a core writing the framebuffer measures 10.5 cycles per BYTE, which
+ * is arbitration, not instructions.
+ *
+ * Worth knowing before changing it: the deadline belongs to the scanline
+ * INTERRUPT re-arming the finished channel, not to the DREQ-paced transfer,
+ * which has a whole line of slack. That is the argument that this may be
+ * safe. It is an argument, not a measurement, which is why this is a runtime
+ * toggle: if the display suffers it can be put back from the console without
+ * a reflash, and the console is on UART so it stays reachable either way. */
+void video_set_dma_priority(bool high)
+{
+    bus_ctrl_hw->priority = high ?
+        (BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS) : 0u;
+}
+
+bool video_get_dma_priority(void)
+{
+    return (bus_ctrl_hw->priority &
+            (BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS)) != 0u;
 }
 
 /* ───────────────────────── vsync presentation ───────────────────────────── */

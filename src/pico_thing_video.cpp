@@ -100,6 +100,24 @@ static uint32_t core0_epoch_frame;	/* video_frames at loop entry */
 static uint32_t service_last_us;	/* when the overlay service last ran */
 static uint32_t service_max_us;		/* worst interval between two services */
 
+/* Clear the figures that only grow, so a second measurement condition starts
+ * from nothing rather than inheriting the first one's worst case. */
+void
+core0_load_reset(void)
+{
+	render_max_us = 0;
+	service_max_us = 0;
+	frames_missed = 0;
+	frames_missed_burst = 0;
+	render_us = 0;
+	cursor_us = 0;
+	core0_loops = 0;
+	core0_epoch_us = time_us_32();
+	core0_epoch_frame = video_frames;
+	service_last_us = core0_epoch_us;
+	vidterm_blit_reset();
+}
+
 void
 core0_load_print(void)
 {
@@ -144,6 +162,8 @@ core0_load_print(void)
 	// says "at what", and the distinction has been got wrong twice.
 	uint32_t blit_total, blit_worst;
 	vidterm_blit_stats(&blit_total, &blit_worst);
+	printf("Bus priority: scan-out DMA %s the cores\n",
+	       video_get_dma_priority() ? "outranks" : "EQUAL to");
 	printf("Text blit:   %lu cells, worst refresh %lu (full screen %u)\n",
 	       (unsigned long)blit_total, (unsigned long)blit_worst,
 	       (unsigned)(TEXT_COLS * TEXT_ROWS));

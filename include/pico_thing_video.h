@@ -94,6 +94,7 @@ void init_pins_range(uint8_t base, uint8_t count);
  * being serviced. Frames missed is the figure that decides whether this core
  * needs more clock -- the display does not wait. */
 void core0_load_print(void);
+void core0_load_reset(void);
 
 struct pio_dma {
 	PIO pio;

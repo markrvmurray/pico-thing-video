@@ -98,6 +98,7 @@ static int      _byte_count;
 %token TOK_POWER
 %token TOK_VERBOSE
 %token TOK_FLOOD
+%token TOK_PRIORITY
 %token TOK_STATUS
 %token TOK_EXAMINE
 %token TOK_MODIFY
@@ -124,6 +125,7 @@ command:
 	| power_cmd
 	| verbose_cmd
 	| flood_cmd
+	| priority_cmd
 	| status_cmd
 	| examine_cmd
 	| modify_cmd
@@ -153,6 +155,10 @@ verbose_cmd:
 
 flood_cmd:
 	TOK_FLOOD { result->tag = CMD_FLOOD; }
+	;
+
+priority_cmd:
+	TOK_PRIORITY { result->tag = CMD_PRIORITY; }
 	;
 
 /* -----------------------------------------------------------------------

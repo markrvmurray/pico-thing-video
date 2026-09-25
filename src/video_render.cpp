@@ -163,6 +163,15 @@ void vidterm_blit_stats(uint32_t *total, uint32_t *worst)
     *worst = blit_cells_max;
 }
 
+/* A maximum only ever grows, so comparing two conditions means clearing it
+ * between them. Learned the expensive way: two runs of different length were
+ * once compared by their maxima and overstated a result threefold. */
+void vidterm_blit_reset(void)
+{
+    blit_cells_total = 0;
+    blit_cells_max = 0;
+}
+
 static void render_dirty_cells(void)
 {
     uint32_t blitted = 0;

@@ -31,6 +31,7 @@
 #include "usb.h"
 #include "vid_link.h"
 #include "win_store.h"
+#include "video.h"
 
 extern "C" {
 typedef struct yy_buffer_state *YY_BUFFER_STATE;
@@ -143,6 +144,23 @@ process_command(char *buf)
 
 	switch (cmd.tag) {
 
+	case CMD_PRIORITY: {
+		/* Toggle who wins the SRAM crossbar, and clear the figures
+		 * that only grow so the next reading measures the new
+		 * condition rather than inheriting the old one's worst case.
+		 * The whole point is comparing two maxima, and a maximum that
+		 * was not reset compares nothing. */
+		const bool now = !video_get_dma_priority();
+		video_set_dma_priority(now);
+		core0_load_reset();
+		printf("Bus priority: scan-out DMA %s the cores%s\n",
+		       now ? "OUTRANKS" : "is EQUAL to",
+		       now ? "" : "  — watch the display");
+		printf("             perf counters cleared; run the test"
+		       " again and compare\n");
+		break;
+	}
+
 	case CMD_FLOOD:
 		/* A measurement hook, not a feature. Expensive Data reads need
 		 * the input FIFO non-empty, and loopback is the only guest-
@@ -212,6 +230,7 @@ status_done:
 #endif
 		"  verbose            (vb)  echo HID keys and clicks to this console\n"
 		"  flood              (fl)  feed the input FIFO continuously (measurement)\n"
+		"  priority           (pr)  toggle scan-out DMA priority over the cores\n"
 		"  help               (h)   this text\n"
 		"\nThe peripheral follows the main 5V rail: bus and video serve only\n"
 		"while it is up; on power loss the firmware restarts into standby\n"

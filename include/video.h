@@ -85,7 +85,14 @@ void vidterm_set_origin(int x, int y);
  * whole-screen repaint is 3840 and nothing else approaches it, so this says
  * whether a slow render call was the text layer or a drawing primitive --
  * which the render timer alone cannot distinguish. */
+/* SRAM crossbar arbitration: true = scan-out DMA outranks the cores (the
+ * bring-up default), false = equal. A runtime toggle because it is an
+ * experiment on a real display, and putting it back must not need a reflash. */
+void video_set_dma_priority(bool high);
+bool video_get_dma_priority(void);
+
 void vidterm_blit_stats(uint32_t *total, uint32_t *worst);
+void vidterm_blit_reset(void);
 
 void vidterm_read_row(int col, int row, int cols, uint8_t *dst);
 void vidterm_write_row(int col, int row, int cols, const uint8_t *src);
