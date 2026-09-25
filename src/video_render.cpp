@@ -1050,10 +1050,25 @@ void vidterm_buf_get(uint8_t group, uint8_t id, int x, int y, int w, int h)
 
     b->xsize = (uint16_t)w;
     b->ysize = (uint16_t)h;
-    for (int row = 0; row < h; row++)
-        for (int col = 0; col < w; col++)
+    for (int row = 0; row < h; row++) {
+        const int py = origin_y + y + row;
+
+        for (int col = 0; col < w; col++) {
+            const int px = origin_x + x + col;
+
+            /* BOUNDED, because this is the one path that reads the plane at
+             * coordinates the guest chose without going through plot's clip.
+             * An off-panel rectangle indexed shadow_row_real[] past its end
+             * and read past a shadow row -- harmless-looking on a host, where
+             * it is one array overrunning into another, and a potential bus
+             * fault on hardware, where PSRAM beyond the declared region is
+             * configured to fault. Off-panel pixels read as the background
+             * rather than as whatever is next in memory. */
             p[(size_t)row * w + col] =
-                shadow_peek(origin_x + x + col, origin_y + y + row);
+                (px >= 0 && px < FB_WIDTH && py >= 0 && py < FB_HEIGHT) ?
+                shadow_peek(px, py) : 0u;
+        }
+    }
 }
 
 /* PutBlk: a buffer back onto the screen, honouring the clip and the mix mode
