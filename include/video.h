@@ -154,6 +154,15 @@ void vidterm_buf_stats(uint32_t *used, uint32_t *high, unsigned *count);
  * Buffer 0 means none. */
 void vidterm_set_pattern(uint8_t group, uint8_t id);
 
+/* Text face and mouse-cursor sprite, both taken from a get/put buffer.
+ * Buffer 0 restores the built-in one. A face is 256 glyphs of CHAR_H bytes,
+ * glyph N at N*CHAR_H -- the built-in layout exactly, so a loaded face needs
+ * no repacking. A sprite is RGB332 with $E3 transparent, its size taken from
+ * the buffer, capped at 16x16, hotspot at its top-left corner. */
+void vidterm_select_font(uint8_t group, uint8_t id);
+void vidterm_select_cursor(uint8_t group, uint8_t id);
+void vidterm_set_bold(bool on);
+
 void vidterm_flood_fill(int x, int y, uint8_t colour);
 void vidterm_fill_stats(uint32_t *overflows);
 void vidterm_clear_graphics(uint8_t colour);

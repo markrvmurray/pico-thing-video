@@ -39,7 +39,8 @@
  * correctly and whatever is drawn underneath shows through the gaps in each
  * glyph. Opaque black was hiding graphics, and doing it so thoroughly that a
  * correctly drawn box once looked like a broken feature. */
-#define CONSOLE_ATTR  0xE1u
+#define CONSOLE_ATTR_BASE  0xE0u
+#define CONSOLE_ATTR       console_attr
 
 /* Multi-byte control sequences ($02 x y cursor position, $05 arg cursor
  * on/off) collect their parameter bytes through this little machine. */
@@ -199,6 +200,8 @@ target_backing(void)
  * The root window is the whole panel, which is what makes this safe to land
  * before any window can be created: with these at their initial values every
  * operation reduces to exactly what it did before. */
+static uint8_t console_attr = CONSOLE_ATTR_BASE | 0x01u;
+
 static int  win_col0;
 static int  win_row0;
 static int  win_cols = TEXT_COLS;
@@ -635,6 +638,33 @@ esc_exec(void)
 		}
 		break;
 	}
+	case 0x39u:			/* GCSet: group, buffer — cursor sprite */
+		vidterm_select_cursor(esc_buf[0], esc_buf[1]);
+		break;
+	case 0x3Au:			/* Font: group, buffer — text face */
+		vidterm_select_font(esc_buf[0], esc_buf[1]);
+		break;
+	case 0x3Cu:			/* TCharSw: transparent text on/off */
+		/* The console has drawn on a transparent background since
+		 * the graphics shadow made erasing possible; this lets a
+		 * guest ask for the opaque behaviour back, which is what it
+		 * wants if it is about to overwrite a busy screen and does
+		 * not care what was underneath. */
+		console_attr = esc_buf[0] != 0u ?
+		    (uint8_t)(CONSOLE_ATTR_BASE | 0x01u) :
+		    (uint8_t)(CONSOLE_ATTR_BASE & ~0x01u);
+		break;
+	case 0x3Du:			/* Bold: on/off */
+		vidterm_set_bold(esc_buf[0] != 0u);
+		break;
+	case 0x3Fu:
+		/* PropSw: proportional spacing. Accepted and deliberately
+		 * does nothing. This is a CELL grid -- the cursor, wrapping,
+		 * scrolling, the dirty map and the parked window screens are
+		 * all indexed by column, and a variable-width glyph has no
+		 * column to be in. Honouring it would mean a different text
+		 * layer, not a flag in this one. */
+		break;
 	case 0x29u:			/* DefGPB: group, buffer, len */
 		vidterm_buf_define(esc_buf[0], esc_buf[1],
 		    (uint32_t)p16(2));
@@ -928,5 +958,9 @@ vid_link_consume_reset(void)
 	dp_y = 0;
 	vidterm_set_logic(0u);		/* replace: the mode nobody pays for */
 	vidterm_set_pattern(0u, 0u);	/* and no fill pattern */
+	vidterm_select_font(0u, 0u);	/* the built-in face */
+	vidterm_select_cursor(0u, 0u);	/* and the built-in arrow */
+	vidterm_set_bold(false);
+	console_attr = CONSOLE_ATTR_BASE | 0x01u;
 	default_palette();
 }

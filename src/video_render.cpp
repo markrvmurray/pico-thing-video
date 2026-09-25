@@ -78,9 +78,98 @@ static inline uint8_t attr_to_bg(uint8_t attr)
 
 /* ─────────────────────────────── 8×16 font ─────────────────────────────── */
 
+/* A guest-supplied face, or the built-in one. The layout is the built-in
+ * one's exactly -- 256 glyphs of 16 bytes, one byte per row, glyph N at N*16
+ * -- so a loaded face drops into this blitter with no repacking at all.
+ *
+ * Resolved ONCE when selected rather than looked up per glyph: a full-screen
+ * refresh asks for 3840 cells and a table scan each would be felt. The
+ * selection is dropped if the buffer holding it is killed, which is the only
+ * way the pointer could go stale. */
+static const uint8_t *font_face;
+static uint32_t       font_face_len;
+static bool           text_bold;
+
+/* Which buffer each selection came from, so a kill can drop it. */
+static uint8_t sel_font_group, sel_font_id;
+static uint8_t sel_ptr_group, sel_ptr_id;
+static bool    sel_font_on, sel_ptr_on;
+
+void vidterm_set_cursor_sprite(const uint8_t *data, int w, int h);
+const uint8_t *vidterm_buf_data(uint8_t group, uint8_t id, uint32_t *len,
+                                uint16_t *xs, uint16_t *ys);
+
+void vidterm_set_font(const uint8_t *data, uint32_t len)
+{
+    font_face = data;
+    font_face_len = len;
+}
+
+/* Called when a buffer is killed: if either selection came from it, put that
+ * selection back to the built-in default rather than leaving a pointer into
+ * storage the pool may hand out again. */
+static void vidterm_selection_dropped(uint8_t group, uint8_t id)
+{
+    if (sel_font_on && sel_font_group == group && sel_font_id == id) {
+        sel_font_on = false;
+        vidterm_set_font(NULL, 0);
+    }
+    if (sel_ptr_on && sel_ptr_group == group && sel_ptr_id == id) {
+        sel_ptr_on = false;
+        vidterm_set_cursor_sprite(NULL, 0, 0);
+    }
+}
+
+void vidterm_select_font(uint8_t group, uint8_t id)
+{
+    uint32_t len = 0;
+    const uint8_t *p = (id == 0u) ? NULL :
+        vidterm_buf_data(group, id, &len, NULL, NULL);
+
+    sel_font_on = (p != NULL);
+    sel_font_group = group;
+    sel_font_id = id;
+    vidterm_set_font(p, len);
+}
+
+void vidterm_select_cursor(uint8_t group, uint8_t id)
+{
+    uint16_t xs = 0, ys = 0;
+    const uint8_t *p = (id == 0u) ? NULL :
+        vidterm_buf_data(group, id, NULL, &xs, &ys);
+
+    sel_ptr_on = (p != NULL);
+    sel_ptr_group = group;
+    sel_ptr_id = id;
+    vidterm_set_cursor_sprite(p, xs, ys);
+}
+
+void vidterm_set_bold(bool on)
+{
+    text_bold = on;
+}
+
 static inline uint8_t font_row(uint8_t ch, int row)
 {
-    return font_spleen_8x16[ch][row & (CHAR_H - 1)];
+    const int r = row & (CHAR_H - 1);
+    uint8_t v;
+
+    if (font_face != NULL) {
+        const uint32_t at = (uint32_t)ch * CHAR_H + (uint32_t)r;
+
+        /* A short face cannot address every glyph. The ones it cannot reach
+         * render BLANK rather than reading past the end of the buffer --
+         * "undefined above" is how a buffer overrun gets written down as a
+         * feature. */
+        v = (at < font_face_len) ? font_face[at] : 0u;
+    } else {
+        v = font_spleen_8x16[ch][r];
+    }
+
+    /* Bold by smearing one pixel right, which is what a bitmap font can do
+     * without a second face. It thickens strokes and closes nothing, since
+     * the glyph cell has a blank column at its right in this face. */
+    return text_bold ? (uint8_t)(v | (v >> 1)) : v;
 }
 
 /* ──────────────────────── get/put buffers ───────────────────────────────── */
@@ -106,6 +195,8 @@ struct gfx_buf {
     uint16_t xsize, ysize;
     uint32_t offset, len;
 };
+
+static void vidterm_selection_dropped(uint8_t group, uint8_t id);
 
 static struct gfx_buf gfx_bufs[GFX_BUF_MAX];
 static uint32_t       gfx_pool_used;
@@ -167,10 +258,35 @@ void vidterm_buf_kill(uint8_t group, uint8_t id)
     if (b != NULL)
         b->used = false;
 
+    /* A face or a sprite is a resolved POINTER into the pool, taken once so
+     * the blitter does not pay for a lookup per glyph. Killing the buffer it
+     * came from is the one way that pointer could go stale, so the selection
+     * is dropped here rather than left to dangle until the pool resets under
+     * it. */
+    vidterm_selection_dropped(group, id);
+
     for (unsigned i = 0; i < GFX_BUF_MAX; i++)
         if (gfx_bufs[i].used)
             return;
     gfx_pool_used = 0;		/* all gone: the pool starts over */
+}
+
+/* Hand out a buffer's bytes and shape, so the console can point the font or
+ * the cursor sprite at one. Returns NULL for a buffer that does not exist,
+ * which is how selecting a dead buffer becomes "keep what you had" rather
+ * than a fault. */
+const uint8_t *vidterm_buf_data(uint8_t group, uint8_t id, uint32_t *len,
+                                uint16_t *xs, uint16_t *ys)
+{
+    const struct gfx_buf *b = gfx_find(group, id);
+    const uint8_t *p = gfx_buf_bytes(b);
+
+    if (p == NULL)
+        return NULL;
+    if (len != NULL) *len = b->len;
+    if (xs != NULL)  *xs = b->xsize;
+    if (ys != NULL)  *ys = b->ysize;
+    return p;
 }
 
 void vidterm_buf_stats(uint32_t *used, uint32_t *high, unsigned *count)
@@ -1076,7 +1192,44 @@ static const uint8_t ptr_edge[PTR_H] = {   /* 1 = outline pixel */
 
 static int     pointer_x, pointer_y;
 static bool    pointer_enabled;
-static uint8_t pointer_save[PTR_H][PTR_W];
+/* A guest sprite replaces the built-in arrow when one is set. Capped at
+ * 16x16 because the pointer is a save-under overlay drawn into the
+ * framebuffer and its cost is paid on every movement; anything larger uses
+ * its top-left corner. The hotspot is 0,0 BY DEFINITION -- there is no field
+ * to carry one, so a guest draws its point at the corner, as the built-in
+ * arrow does.
+ *
+ * $E3 is transparent: bright magenta, the traditional key precisely because
+ * nobody wants it deliberately. A sprite with no transparency would be a
+ * rectangle. */
+#define PTR_MAX		16
+#define PTR_KEY		0xE3u
+
+static const uint8_t *ptr_sprite;	/* NULL: use the built-in arrow */
+static int            ptr_sprite_w, ptr_sprite_h;
+
+void vidterm_set_cursor_sprite(const uint8_t *data, int w, int h)
+{
+    if (data == NULL || w <= 0 || h <= 0) {
+        ptr_sprite = NULL;
+        return;
+    }
+    ptr_sprite = data;
+    ptr_sprite_w = w > PTR_MAX ? PTR_MAX : w;
+    ptr_sprite_h = h > PTR_MAX ? PTR_MAX : h;
+}
+
+static inline int ptr_width(void)
+{
+    return ptr_sprite != NULL ? ptr_sprite_w : PTR_W;
+}
+
+static inline int ptr_height(void)
+{
+    return ptr_sprite != NULL ? ptr_sprite_h : PTR_H;
+}
+
+static uint8_t pointer_save[PTR_MAX][PTR_MAX];
 static bool    pointer_drawn;
 static int     pointer_drawn_x, pointer_drawn_y;
 
@@ -1100,11 +1253,11 @@ static void pointer_hide(void)
 {
     if (!pointer_drawn)
         return;
-    for (int gy = 0; gy < PTR_H; gy++) {
+    for (int gy = 0; gy < ptr_height(); gy++) {
         const int y = pointer_drawn_y + gy;
         if (y >= FB_HEIGHT)
             break;
-        int w = PTR_W;
+        int w = ptr_width();
         if (pointer_drawn_x + w > FB_WIDTH)
             w = FB_WIDTH - pointer_drawn_x;
         memcpy(&video_framebuffer[y][pointer_drawn_x], pointer_save[gy], (size_t)w);
@@ -1116,19 +1269,28 @@ static void pointer_show(void)
 {
     if (pointer_drawn || !pointer_enabled)
         return;
-    for (int gy = 0; gy < PTR_H; gy++) {
+    for (int gy = 0; gy < ptr_height(); gy++) {
         const int y = pointer_y + gy;
         if (y >= FB_HEIGHT)
             break;
-        int w = PTR_W;
+        int w = ptr_width();
         if (pointer_x + w > FB_WIDTH)
             w = FB_WIDTH - pointer_x;
         uint8_t *line = &video_framebuffer[y][pointer_x];
         memcpy(pointer_save[gy], line, (size_t)w);
         for (int gx = 0; gx < w; gx++) {
-            const uint8_t bit = (uint8_t)(0x80u >> gx);
-            if (ptr_shape[gy] & bit)
-                line[gx] = (ptr_edge[gy] & bit) ? 0x00u : 0xFFu;
+            if (ptr_sprite != NULL) {
+                const uint8_t px =
+                    ptr_sprite[(size_t)gy * ptr_sprite_w + gx];
+
+                if (px != PTR_KEY)
+                    line[gx] = px;
+            } else {
+                const uint8_t bit = (uint8_t)(0x80u >> gx);
+
+                if (ptr_shape[gy] & bit)
+                    line[gx] = (ptr_edge[gy] & bit) ? 0x00u : 0xFFu;
+            }
         }
     }
     pointer_drawn = true;
