@@ -296,6 +296,7 @@ static volatile uint32_t stat_rx_pushed;	/* bytes accepted into the input FIFO *
 static volatile uint32_t stat_rx_popped;	/* Data reads that dequeued */
 static volatile uint32_t stat_rx_overruns;	/* loopback pushes dropped */
 static volatile uint32_t stat_tx_capped;	/* drains that hit the bound */
+static volatile uint32_t stat_tx_dropped;	/* writes lost to a full FIFO */
 static volatile uint8_t  stat_last_byte;
 
 extern registers &reg;
@@ -429,8 +430,23 @@ __not_in_flash_func(vid_link_guest_write)(uint8_t location, uint8_t value)
 {
 	switch (location) {
 	case VID_DATA_OFFSET:
-		/* TDRE promised acceptance; a full FIFO here means the guest
-		 * wrote without polling — drop, as agreed (graceful, no hang). */
+		/* TDRE promised acceptance, so a full FIFO here means the
+		 * guest wrote without polling. Dropping is the agreed
+		 * behaviour -- better than blocking a bus cycle -- but it is
+		 * NOT graceful, whatever the old comment here claimed.
+		 *
+		 * This stream is framed: every command has a fixed parameter
+		 * count and the bytes that follow are read as whatever the
+		 * frame says comes next. Lose one byte and every byte after
+		 * it is misread -- a coordinate taken from a colour, a
+		 * sub-code taken from half a coordinate. The picture does not
+		 * break, it goes subtly WRONG, which is far harder to
+		 * recognise than a blank screen.
+		 *
+		 * So count it. A silent drop is the difference between
+		 * "the guest sent something odd" and "we lost a byte and
+		 * everything after it was nonsense", and until now nothing
+		 * could tell those apart. */
 		if (tx_level() < TX_FIFO_SIZE) {
 			tx_fifo[tx_head & TX_FIFO_MASK] = value;
 			/* RELEASE, as in rx_push: the slot must be visible before
@@ -440,6 +456,8 @@ __not_in_flash_func(vid_link_guest_write)(uint8_t location, uint8_t value)
 			std::atomic_thread_fence(std::memory_order_release);
 			tx_head = tx_head + 1u;
 			stat_tx_accepted = stat_tx_accepted + 1u;
+		} else {
+			stat_tx_dropped = stat_tx_dropped + 1u;
 		}
 		break;
 	case VID_MOUSE_OFFSET:
@@ -537,6 +555,14 @@ vid_link_print_status(void)
 	       stat_last_byte);
 	printf("             pending %u, drain capped %lu\n",
 	       (unsigned)tx_level(), (unsigned long)stat_tx_capped);
+	/* Only speaks when it has something to say, because a zero here is
+	 * the only acceptable reading. Anything else means the command stream
+	 * lost its framing and everything drawn after that point was decoded
+	 * from the wrong bytes. */
+	if (stat_tx_dropped != 0u)
+		printf("             %lu WRITES DROPPED — the command stream"
+		       " lost framing from that point\n",
+		       (unsigned long)stat_tx_dropped);
 	printf("Input:       recv %lu pop %lu pending %u ovr %lu; RDRF %s\n",
 	       (unsigned long)stat_rx_pushed, (unsigned long)stat_rx_popped,
 	       (unsigned)rx_level(),
