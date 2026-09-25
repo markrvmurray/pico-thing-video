@@ -93,7 +93,12 @@ fill_cell_row(uint8_t *line, uint8_t colour)
     const uint32_t v = (uint32_t)colour * 0x01010101u;
     uint32_t w[2] = { v, v };
 
-    memcpy(line, w, CHAR_W);
+    /* The alignment has to be ASSERTED. Rows are 4-aligned and CHAR_W is 8,
+     * so every cell starts on a word -- but the compiler cannot see that
+     * through the pointer arithmetic, and without the hint it emits eight
+     * byte stores, which is what it was doing before this was a "fast path"
+     * at all. Checked in the disassembly, not assumed. */
+    memcpy(__builtin_assume_aligned(line, 4), w, CHAR_W);
 }
 
 static void OPTIMIZE_O3
@@ -248,10 +253,36 @@ void vidterm_clear_region(int col, int row, int cols, int rows,
     }
 }
 
+/* Does this glyph put no pixels down at all? A space does not, and neither do
+ * several other cells, and the answer decides whether a screenful of them is
+ * half a million glyph blits or one fill. */
+static bool glyph_is_blank(uint8_t ch)
+{
+    for (int gy = 0; gy < CHAR_H; gy++)
+        if (font_row(ch, gy) != 0)
+            return false;
+    return true;
+}
+
 void vidterm_clear(uint8_t ch, uint8_t attr)
 {
     memset(text_cells, ch,   sizeof(text_cells));
     memset(text_attrs, attr, sizeof(text_attrs));
+
+    /* A blank opaque cell renders as a flat field of its background, and the
+     * grid covers the whole panel -- so a clear to blank IS a fill, and
+     * blitting it cell by cell paints the same pixels a second time. That
+     * second pass was most of a 22 ms clear: the framebuffer written twice,
+     * once by memset and once by a per-pixel loop drawing a glyph that has
+     * no pixels. Nothing is dirty afterwards, because nothing is left to
+     * draw. */
+    if (glyph_is_blank(ch) && (attr & 0x01) == 0) {
+        memset(video_framebuffer, attr_to_bg(attr),
+               sizeof(video_framebuffer));
+        memset(dirty_rows, 0, sizeof(dirty_rows));
+        return;
+    }
+
     for (int r = 0; r < TEXT_ROWS; r++) {
         for (int w = 0; w < DIRTY_WORDS; w++)
             dirty_rows[r][w] = 0xFFFFFFFF;
