@@ -357,18 +357,20 @@ win_unpark(const struct window *w)
 
 /* Adopt a window as the current one: its rectangle becomes the coordinate
  * model and its cursor becomes the cursor. */
+/* Push the target window's origin and bounds into the renderer, and tell the
+ * guest what it is drawing on. Separate from adopting a window because
+ * DWProtSw changes only these: routing it through the full adopt would also
+ * reload the window's STORED cursor over the live one, teleporting the caret
+ * for a command that has nothing to say about it. */
 static void
-win_adopt(unsigned id)
+win_apply_view(void)
 {
-	const struct window *w = &windows[id];
+	const struct window *w = &windows[win_target];
 
-	win_target = id;
 	win_col0 = w->col0 + w->wa_col;
 	win_row0 = w->row0 + w->wa_row;
 	win_cols = w->wa_cols;
 	win_rows = w->wa_rows;
-	cur_col  = w->cur_col;
-	cur_row  = w->cur_row;
 
 	/* Graphics coordinates become window-relative and bounded here. The
 	 * plane itself stays global and shared -- this says where a primitive
@@ -385,14 +387,21 @@ win_adopt(unsigned id)
 		 * drawing somewhere else. */
 		vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
 
-	/* The read-back must describe what was actually built, every time --
-	 * that is the whole contract behind clamping rather than refusing. */
 	/* The WORKING AREA, not the window: what the guest can actually draw
-	 * on is what the read-back has to describe, or CWArea would narrow
-	 * the drawing surface without telling anyone. */
+	 * on is what a read-back has to describe, or CWArea would narrow the
+	 * drawing surface without telling anyone. */
 	vid_link_info_set((uint16_t)(win_cols * CHAR_W),
 	    (uint16_t)(win_rows * CHAR_H), (uint8_t)win_cols,
 	    (uint8_t)win_rows);
+}
+
+static void
+win_adopt(unsigned id)
+{
+	win_target = id;
+	cur_col = windows[id].cur_col;
+	cur_row = windows[id].cur_row;
+	win_apply_view();
 }
 
 static void
@@ -500,8 +509,8 @@ esc_exec(void)
 		w->wa_row = y;
 		w->wa_cols = cw;
 		w->wa_rows = ch;
-		win_adopt(win_target);	/* re-derive the coordinate model */
-		cur_col = 0;
+		win_apply_view();	/* re-derive the coordinate model */
+		cur_col = 0;		/* a new area starts at its own corner */
 		cur_row = 0;
 		break;
 	}
@@ -512,7 +521,7 @@ esc_exec(void)
 		 * to scroll. A CoCo3 protects the boundary generally; here the
 		 * switch means what it can usefully mean. */
 		windows[win_target].protect = esc_buf[0] != 0u;
-		win_adopt(win_target);
+		win_apply_view();	/* view only: the cursor is not its business */
 		break;
 	case 0x26u: {			/* DWShow: id — VISIBILITY only */
 		const unsigned id = esc_buf[0];
