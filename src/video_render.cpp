@@ -577,6 +577,102 @@ void vidterm_clear_graphics(uint8_t colour)
     vidterm_shadow_reset(colour);
 }
 
+/* Integer square root, because there is no FPU here and a circle should not
+ * pull in soft-float. Bit-by-bit restoring method: exact for every input, and
+ * bounded at sixteen iterations for the range a screen coordinate can reach. */
+static uint32_t isqrt32(uint32_t n)
+{
+    uint32_t rem = 0, root = 0;
+
+    for (int i = 0; i < 16; i++) {
+        root <<= 1;
+        rem = (rem << 2) | (n >> 30);
+        n <<= 2;
+        if (root < rem) {
+            rem -= root | 1u;
+            root += 2u;
+        }
+    }
+    return root >> 1;
+}
+
+/* Midpoint ellipse, plotted in four-way symmetry. The two regions are where
+ * the curve is shallower than 45 degrees and where it is steeper; splitting
+ * them is what keeps the step decision a single comparison per pixel. */
+void vidterm_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
+{
+    if (rx < 0 || ry < 0)
+        return;
+    if (rx == 0 || ry == 0) {	/* degenerate: a line, not a curve */
+        if (rx == 0)
+            vidterm_vline(cx, cy - ry, 2 * ry + 1, colour);
+        else
+            vidterm_hline(cx - rx, cy, 2 * rx + 1, colour);
+        return;
+    }
+
+    const long rx2 = (long)rx * rx, ry2 = (long)ry * ry;
+    long x = 0, y = ry;
+    long d = ry2 - rx2 * ry + rx2 / 4;
+    long dx = 0, dy = 2 * rx2 * ry;
+
+    while (dx < dy) {			/* region 1 */
+        plot_unlocked(cx + (int)x, cy + (int)y, colour);
+        plot_unlocked(cx - (int)x, cy + (int)y, colour);
+        plot_unlocked(cx + (int)x, cy - (int)y, colour);
+        plot_unlocked(cx - (int)x, cy - (int)y, colour);
+        x++;
+        dx += 2 * ry2;
+        d += ry2 + dx;
+        if (d >= 0) {
+            y--;
+            dy -= 2 * rx2;
+            d -= dy;
+        }
+    }
+
+    d = ry2 * (x * 2 + 1) * (x * 2 + 1) / 4 +
+        rx2 * (y - 1) * (y - 1) - rx2 * ry2;
+    while (y >= 0) {			/* region 2 */
+        plot_unlocked(cx + (int)x, cy + (int)y, colour);
+        plot_unlocked(cx - (int)x, cy + (int)y, colour);
+        plot_unlocked(cx + (int)x, cy - (int)y, colour);
+        plot_unlocked(cx - (int)x, cy - (int)y, colour);
+        y--;
+        dy -= 2 * rx2;
+        d += rx2 - dy;
+        if (d <= 0) {
+            x++;
+            dx += 2 * ry2;
+            d += dx;
+        }
+    }
+}
+
+/* Filled ellipse as horizontal spans, one per scanline. Deliberately not the
+ * outline algorithm with the gaps joined up: a span is a run, and runs are
+ * what this renderer is fast at -- the same reason rectangles stopped being
+ * filled a pixel at a time. */
+void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
+{
+    if (rx < 0 || ry < 0)
+        return;
+    if (ry == 0) {
+        vidterm_hline(cx - rx, cy, 2 * rx + 1, colour);
+        return;
+    }
+
+    for (int dy = -ry; dy <= ry; dy++) {
+        /* half-width = rx * sqrt(ry^2 - dy^2) / ry, kept in integers. The
+         * square root is taken of a value no larger than ry^2, so the
+         * multiply that follows cannot overflow for any on-screen radius. */
+        const uint32_t root = isqrt32((uint32_t)(ry * ry - dy * dy));
+        const int dx = (int)(((uint32_t)rx * root) / (uint32_t)ry);
+
+        vidterm_hline(cx - dx, cy + dy, 2 * dx + 1, colour);
+    }
+}
+
 void vidterm_circle(int cx, int cy, int radius, uint8_t colour)
 {
     int x = 0, y = radius;

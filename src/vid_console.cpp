@@ -632,6 +632,26 @@ esc_exec(void)
 		}
 		break;
 	}
+	case 0x50u:			/* Circle: radius, centred on the pointer */
+		vidterm_ellipse(dp_x, dp_y, p16(0), p16(0), fg);
+		break;
+	case 0x53u:			/* FCircle */
+		vidterm_fill_ellipse(dp_x, dp_y, p16(0), p16(0), fg);
+		break;
+	case 0x51u:			/* Ellipse: x radius, y radius */
+		vidterm_ellipse(dp_x, dp_y, p16(0), p16(2), fg);
+		break;
+	case 0x54u:			/* FEllipse */
+		vidterm_fill_ellipse(dp_x, dp_y, p16(0), p16(2), fg);
+		break;
+	case 0x34u:
+		/* Border: accepted and deliberately does nothing. A CoCo3 has
+		 * a border region around its active display and this panel has
+		 * none -- 1024x480 is all active, edge to edge. Answering it
+		 * silently beats leaving it in the unimplemented default,
+		 * where it would look like an oversight rather than a
+		 * decision. */
+		break;
 	case 0x4Eu:			/* PutGC: guest places the graphics cursor */
 		/* Translated by hand: every other primitive coordinate is
 		 * window-relative because the renderer's clip rectangle is

@@ -126,6 +126,8 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour);
 void vidterm_hline(int x, int y, int len, uint8_t colour);
 void vidterm_vline(int x, int y, int len, uint8_t colour);
 void vidterm_circle(int cx, int cy, int radius, uint8_t colour);
+void vidterm_ellipse(int cx, int cy, int rx, int ry, uint8_t colour);
+void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour);
 void vidterm_clear_graphics(uint8_t colour);
 
 #ifdef __cplusplus
