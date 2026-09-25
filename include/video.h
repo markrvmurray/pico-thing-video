@@ -53,7 +53,11 @@ void video_demo(void);
 /* ── Text layer ─────────────────────────────────────────────────────────── */
 void vidterm_putch(int col, int row, uint8_t ch, uint8_t attr);
 void vidterm_puts(int col, int row, const char *s, uint8_t attr);
-void vidterm_clear(uint8_t ch, uint8_t attr);
+/* Returns TRUE if it painted the panel itself, in which case nothing is dirty
+ * and no other fill is needed. A whole-screen write costs about 16 ms against
+ * the scan-out DMA, so a second one for the same pixels is most of a frame
+ * thrown away. */
+bool vidterm_clear(uint8_t ch, uint8_t attr);
 void vidterm_refresh(void);   /* blit dirty text cells into the framebuffer */
 void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr);
 

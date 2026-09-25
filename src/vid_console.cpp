@@ -276,8 +276,14 @@ clear_all(void)
 	 * panel -- may clear it. A window clearing itself must not wipe the
 	 * drawing every other window shares. */
 	if (win_is_root() && target_is_visible()) {
-		vidterm_clear_graphics(palette[bcolor_reg & 0x0Fu]);
-		vidterm_clear(' ', CONSOLE_ATTR);
+		/* The text clear paints the panel itself when the cell is
+		 * blank and opaque, which is the ordinary case. A
+		 * whole-screen write costs about 16 ms here, so clearing the
+		 * graphics plane as well would spend most of another frame
+		 * painting pixels that are about to be painted again. Fill it
+		 * only when the text will NOT cover it. */
+		if (!vidterm_clear(' ', CONSOLE_ATTR))
+			vidterm_clear_graphics(palette[bcolor_reg & 0x0Fu]);
 	} else {
 		surface_clear(0, 0, win_cols, win_rows);
 	}
