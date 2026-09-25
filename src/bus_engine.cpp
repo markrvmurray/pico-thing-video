@@ -205,11 +205,23 @@ __time_critical_func(dma_bus_read_irq_handler())
 	// how long the previous one took. Closer together than that, and the
 	// restage had not completed when the next cycle was served.
 	//
-	// It cannot happen at 1 MHz with a healthy handler: reads are at least
-	// a microsecond apart and the handler takes 0.4 us at worst. So a
-	// non-zero count here is not a tight margin, it is proof that
-	// something stalled this core long enough to miss a bus cycle -- which
-	// is exactly what a hang with no other explanation needs.
+	// It cannot happen at 1 MHz with a healthy handler: consecutive bus
+	// cycles are 1000 ns apart and the handler's worst case is 422 ns, so
+	// there is nearly 600 ns of margin before this can speak. A non-zero
+	// count is therefore not a tight margin -- it is proof that something
+	// stalled this core long enough to miss a bus cycle, which is exactly
+	// what a hang with no other explanation needs. Even the 16-bit load
+	// the protocol forbids would not trip it at this clock; it takes a
+	// genuine stall.
+	//
+	// The cycle counter is 32 bits and wraps every 13.4 seconds at
+	// 320 MHz, so a read following a longer idle than that subtracts
+	// across the wrap and yields an arbitrary gap. For that to be
+	// mistaken for a stale service the wrapped value must land below the
+	// previous duration -- about 135 of four billion, once per idle. Left
+	// unguarded deliberately: a guard costs the hot path more than a
+	// one-in-thirty-million false positive costs the reader, and writing
+	// the arithmetic down is cheaper than either.
 	if (isr_read_prev_in != 0u) {
 		const uint32_t gap = t_in - isr_read_prev_in;
 
