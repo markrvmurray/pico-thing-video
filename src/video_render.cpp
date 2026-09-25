@@ -103,6 +103,22 @@ blit_char_cell(int col, int row)
         uint8_t mask = font_row(ch, gy);
         uint8_t *line = &video_framebuffer[y + gy][x];
 
+        /* A uniform row is the common one, not a curiosity. A space is
+         * blank in all sixteen of its rows, and after any clear, scroll or
+         * erase most of the grid is spaces -- so the whole-screen refresh
+         * that follows a clear is almost entirely this case. Testing the
+         * mask once and filling beats testing it once per pixel: eight
+         * branches and eight byte stores become one run. */
+        if (mask == 0x00) {
+            if (!transparent)
+                memset(line, bg, CHAR_W);
+            continue;
+        }
+        if (mask == 0xFF) {
+            memset(line, fg, CHAR_W);
+            continue;
+        }
+
         for (int gx = 0; gx < CHAR_W; gx++) {
             bool is_fg = (mask & (0x80 >> gx)) != 0;
 
