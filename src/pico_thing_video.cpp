@@ -170,6 +170,15 @@ core0_load_print(void)
 	if (fill_over != 0u)
 		printf("Flood fill:  %lu seeds DROPPED — fills were incomplete\n",
 		       (unsigned long)fill_over);
+	// Buffer pool: whether a DefGPB actually got its storage, and how
+	// much of the pool is gone. Reported because a buffer that was never
+	// allocated behaves exactly like one that was and then drew nothing,
+	// and those want different things looked at.
+	uint32_t buf_used, buf_high;
+	unsigned buf_count;
+	vidterm_buf_stats(&buf_used, &buf_high, &buf_count);
+	printf("Buffers:     %u live, %lu B used, %lu B high water\n",
+	       buf_count, (unsigned long)buf_used, (unsigned long)buf_high);
 	printf("Bus priority: scan-out DMA %s the cores\n",
 	       video_get_dma_priority() ? "outranks" : "EQUAL to");
 	printf("Text blit:   %lu cells, worst refresh %lu (full screen %u)\n",
