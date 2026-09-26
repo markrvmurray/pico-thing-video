@@ -1781,14 +1781,20 @@ void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y)
 
 /* ───────────────────────────── flood fill ───────────────────────────────── */
 
-/* Seeds waiting to be grown. A SCANLINE fill, so what is stacked is one seed
- * per run of unfilled pixels on the row above or below a completed span --
- * not one entry per pixel.
+/* Work waiting to be done, as SEGMENTS: "the run [x1, x2] on row y is filled;
+ * look at row y + dy beneath it". This is the parent-span scanline fill
+ * (Heckbert, Graphics Gems I), and the parent is the point of it. The fill it
+ * replaced stacked bare seed points and, filling a run, scanned BOTH
+ * neighbouring rows across its whole width -- including the row it had just
+ * come from, which was known to be filled over exactly the parent's extent.
+ * That second scan was a third of the region search, all of it finding
+ * nothing. Here a row is scanned only in the direction the work is going,
+ * and back towards the parent only where a run LEAKS past the parent's ends.
  *
- * The stack lives in PSRAM (fill_log.h), one packed word a seed. It was a
+ * The stack lives in PSRAM (fill_log.h), one packed word a segment. It was a
  * 96-entry static in SRAM, sized by what SRAM could spare rather than by what
  * a picture needs, and an ordinary busy region overflowed it by hundreds --
- * dropping seeds and leaving holes (VID-037). Recursion was never an option:
+ * dropping work and leaving holes (VID-037). Recursion was never an option:
  * the C stack here is 4 KB a core.
  *
  * With no PSRAM there is nowhere large to put it, so a small stack on the
@@ -1796,16 +1802,18 @@ void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y)
  * bounded, and counted when the bound is reached. That costs SRAM only for
  * the length of the call, where the static cost it permanently.
  *
- * WHEN THE BOUND IS REACHED the seed is dropped and counted. The region then
- * fills incompletely, which is visibly wrong -- but it is wrong in a way that
- * stops, rather than one that corrupts memory, and the counter says it
+ * WHEN THE BOUND IS REACHED the segment is dropped and counted. The region
+ * then fills incompletely, which is visibly wrong -- but it is wrong in a way
+ * that stops, rather than one that corrupts memory, and the counter says it
  * happened rather than leaving someone to wonder why a shape has a notch in
  * it. */
 #define FILL_STACK_SRAM	64u
 
-static inline uint32_t seed_pack(int x, int y)
+/* x1 and x2 in ten bits each, y in nine, the direction in one. */
+static inline uint32_t seg_pack(int y, int x1, int x2, int dy)
 {
-    return ((uint32_t)y << 10) | (uint32_t)x;
+    return ((dy < 0) ? (1u << 29) : 0u) | ((uint32_t)y << 20) |
+           ((uint32_t)x1 << 10) | (uint32_t)x2;
 }
 
 static uint32_t fill_overflows;		/* seeds dropped */
@@ -1956,56 +1964,76 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
         stack = sram_stack;
 
     uint32_t sp = 0;
-    stack[sp++] = seed_pack(sx, sy);
 
-    while (sp > 0u) {
-        const uint32_t seed = stack[--sp];
-        const int py = (int)(seed >> 10);
-        const int px = (int)(seed & 0x3FFu);
+    /* Stack the segment [a, b] of row y for a look at row y + dy -- if that
+     * row is inside the clip at all. */
+    auto push = [&](int y, int a, int b, int dy) {
+        if (y + dy < clip_y0 || y + dy >= clip_y1)
+            return;
+        if (sp < stack_max)
+            stack[sp++] = seg_pack(y, a, b, dy);
+        else
+            fill_overflows++;
+    };
 
-        /* A seed can be stale: another span may have reached it between
-         * being pushed and being popped. */
-        if (video_framebuffer[py][px] != target)
-            continue;
-
-        const int x1 = run_start(video_framebuffer[py], px, clip_x0, target);
-        const int x2 = run_end(video_framebuffer[py], px, clip_x1, target) - 1;
-
+    /* Claim the run [a, b] of row y: fill it, and for a two-pass fill, log
+     * it for painting. */
+    auto claim = [&](int y, int a, int b) {
         if (plain) {
-            fill_span_abs(x1, x2 + 1, py, colour);
+            fill_span_abs(a, b + 1, y, colour);
         } else {
-            memset(&video_framebuffer[py][x1], colour, (size_t)(x2 + 1 - x1));
+            memset(&video_framebuffer[y][a], colour, (size_t)(b + 1 - a));
             if (log != NULL && logged < FILL_LOG_SPANS) {
-                log[logged++] = span_pack(py, x1, x2);
+                log[logged++] = span_pack(y, a, b);
             } else {
                 /* Past the log's end, or no PSRAM: this span stays solid.
                  * Visibly unpatterned, but consistent -- the shadow gets
-                 * the same bytes -- and COUNTED, like a dropped seed. */
-                shadow_fill_span(x1, x2 + 1, py, colour);
+                 * the same bytes -- and COUNTED, like a dropped segment. */
+                shadow_fill_span(a, b + 1, y, colour);
                 fill_log_overflows++;
             }
         }
+    };
 
-        /* One seed per RUN on each neighbouring row, not per pixel: after
-         * seeding a run, skip to its end. That is the whole economy of the
-         * scanline method. */
-        for (int ny = py - 1; ny <= py + 1; ny += 2) {
-            if (ny < clip_y0 || ny >= clip_y1)
-                continue;
-            const uint8_t *const nrow = video_framebuffer[ny];
-            int i = x1;
+    {
+        const uint8_t *const row = video_framebuffer[sy];
+        const int a = run_start(row, sx, clip_x0, target);
+        const int b = run_end(row, sx, clip_x1, target) - 1;
 
-            for (;;) {
-                i = run_find(nrow, i, x2 + 1, target);
-                if (i > x2)
-                    break;
-                if (sp < stack_max) {
-                    stack[sp++] = seed_pack(i, ny);
-                } else {
-                    fill_overflows++;
-                }
-                i = run_end(nrow, i, x2 + 1, target);
-            }
+        claim(sy, a, b);
+        push(sy, a, b, 1);
+        push(sy, a, b, -1);
+    }
+
+    while (sp > 0u) {
+        const uint32_t seg = stack[--sp];
+        const int dy = (seg & (1u << 29)) ? -1 : 1;
+        const int y = (int)((seg >> 20) & 0x1FFu) + dy;
+        const int x1 = (int)((seg >> 10) & 0x3FFu);
+        const int x2 = (int)(seg & 0x3FFu);
+        const uint8_t *const row = video_framebuffer[y];
+
+        /* Every unfilled run of row y that touches the parent's extent.
+         * Work stacked earlier may already have filled some or all of it;
+         * a run that is gone is simply not found. */
+        for (int x = x1;;) {
+            x = run_find(row, x, x2 + 1, target);
+            if (x > x2)
+                break;
+
+            /* The run may reach past the parent at either end. */
+            const int a = run_start(row, x, clip_x0, target);
+            const int b = run_end(row, x, clip_x1, target) - 1;
+
+            claim(y, a, b);
+            push(y, a, b, dy);
+            /* Where it leaks past the parent, the row the parent was on is
+             * unexplored beneath the leak -- and only there. */
+            if (a < x1)
+                push(y, a, x1 - 1, -dy);
+            if (b > x2)
+                push(y, x2 + 1, b, -dy);
+            x = b + 1;
         }
     }
 
