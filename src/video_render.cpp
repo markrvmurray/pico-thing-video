@@ -376,15 +376,23 @@ static inline const uint8_t *shadow_row_ro(int y)
 
 /* Read one pixel of the shadow. The common answer needs no memory access at
  * all, which is the point: a screen of text over a plain background asks this
- * question half a million times and gets the uniform colour every time. */
+ * question half a million times and gets the uniform colour every time.
+ *
+ * With NO shadow storage the plane is not being kept at all -- no row is ever
+ * made real, so the uniform colour would be answered everywhere, and a mix
+ * mode would combine with a flat colour instead of the picture. The
+ * framebuffer is then the best account of the picture there is (graphics and
+ * text together, as it was before the shadow existed), so that is the
+ * answer. Found by running the no-PSRAM paths for the first time: an XOR over
+ * a drawn picture replaced the picture with a flat one. */
 static inline uint8_t shadow_peek(int x, int y)
 {
-    const uint8_t *base;
-
-    if (!shadow_any_real || !shadow_row_real[y])
-        return shadow_uniform_colour;
-    base = gfx_shadow_base();
-    return base == NULL ? shadow_uniform_colour : base[(size_t)y * FB_WIDTH + x];
+    /* A row is only ever made real when there is storage to make it in, so
+     * a real row needs no second question. */
+    if (shadow_any_real && shadow_row_real[y])
+        return gfx_shadow_base()[(size_t)y * FB_WIDTH + x];
+    return gfx_shadow_base() == NULL ? video_framebuffer[y][x] :
+        shadow_uniform_colour;
 }
 
 /* Everything the guest draws goes to both planes: the framebuffer, which is
@@ -1276,15 +1284,33 @@ static void paint_span(int py, int x0, int x1, uint8_t colour, const uint8_t *sr
     if (src == NULL) {
         uint8_t *const line = &video_framebuffer[py][x0];
         const int n = x1 - x0;
+        const uint8_t *const sbase = gfx_shadow_base();
+
+        /* No shadow storage: the mix base is the framebuffer itself (see
+         * shadow_peek), which composing would overwrite -- so take each
+         * chunk of it before composing into that chunk. */
+        if (logic_mode != LOGIC_NORMAL && sbase == NULL) {
+            uint8_t base[PAINT_CHUNK];
+
+            for (int a = 0; a < n; a += PAINT_CHUNK) {
+                const int k = n - a < PAINT_CHUNK ? n - a : PAINT_CHUNK;
+
+                memcpy(base, &line[a], (size_t)k);
+                if (pattern_on)
+                    pattern_row(&line[a], k, py, x0 + a, colour);
+                else
+                    memset(&line[a], colour, (size_t)k);
+                mix_into(&line[a], base, k);
+            }
+            return;
+        }
 
         if (pattern_on)
             pattern_row(line, n, py, x0, colour);
         else
             memset(line, colour, (size_t)n);
         if (logic_mode != LOGIC_NORMAL) {
-            const uint8_t *const sbase = gfx_shadow_base();
-
-            if (sbase != NULL && shadow_row_real[py]) {
+            if (shadow_row_real[py]) {
                 const uint8_t *const srow = &sbase[(size_t)py * FB_WIDTH];
                 uint8_t base[PAINT_CHUNK];
 
@@ -1341,10 +1367,13 @@ static void paint_span(int py, int x0, int x1, uint8_t colour, const uint8_t *sr
 
         if (src != NULL)
             copy_from_psram(tmp, &src[a - x0], (size_t)n);
+        /* The mix base goes into the framebuffer row: the shadow's row,
+         * its uniform colour, or -- with no shadow storage -- what the
+         * row already holds, which is then left as it is. */
         if (mixing) {
             if (srow_ro != NULL)
                 copy_from_psram(&line[a], &srow_ro[a], (size_t)n);
-            else
+            else if (sbase != NULL)
                 memset(&line[a], shadow_uniform_colour, (size_t)n);
         }
         for (int i = 0; i < n; i++) {
