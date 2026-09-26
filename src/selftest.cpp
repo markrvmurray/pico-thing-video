@@ -512,6 +512,48 @@ test_blit_timing(void)
 		} else {
 			timed("patterned FFill, full panel", fus, 150000u);
 		}
+
+		/* ATTRIBUTION. The patterned FFill above measured 65.5 ms after
+		 * the span writer went in, against a prediction of 12-25 ms. The
+		 * prediction costed the painting and forgot the flood fill's own
+		 * work: finding the region scans every row and both neighbours
+		 * pixel by pixel, ~1.5 million comparisons on a full panel, and
+		 * that is paid patterned or not. These two lines measure the two
+		 * halves separately, so the explanation is a measurement rather
+		 * than a second guess: a PLAIN full-panel FFill is the region
+		 * search plus a solid fill, and a patterned full-panel Bar is the
+		 * span writer alone, with no search. If they do not roughly add
+		 * up to the patterned FFill, something else is going on.
+		 *
+		 * Budgets are placeholders until a first measurement exists. */
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00u);
+		uint32_t t1 = time_us_32();
+		vidterm_flood_fill(10, 10, 0xFFu);
+		const uint32_t plain_us = time_us_32() - t1;
+		if (video_framebuffer[0][0] != 0xFFu ||
+		    video_framebuffer[FB_HEIGHT - 1][FB_WIDTH - 1] != 0xFFu)
+			result("FFill, full panel, plain", false,
+			    "did not fill the panel - timing meaningless");
+		else
+			timed("FFill, full panel, plain", plain_us, 60000u);
+
+		vidterm_buf_define(G, ID, 4u);
+		vidterm_buf_shape(G, ID, 2u, 2u);
+		for (uint32_t i = 0; i < 4u; i++)
+			(void)vidterm_buf_poke(G, ID, i, CHECKER[i]);
+		vidterm_set_pattern(G, ID);
+		t1 = time_us_32();
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0xFFu);
+		const uint32_t bar_us = time_us_32() - t1;
+		vidterm_set_pattern(0u, 0u);
+		vidterm_buf_kill(G, ID);
+		if (video_framebuffer[0][0] != CHECKER[0] ||
+		    video_framebuffer[0][1] != CHECKER[1] ||
+		    video_framebuffer[1][0] != CHECKER[2])
+			result("patterned Bar, full panel", false,
+			    "pattern not applied - timing meaningless");
+		else
+			timed("patterned Bar, full panel", bar_us, 60000u);
 	}
 }
 
