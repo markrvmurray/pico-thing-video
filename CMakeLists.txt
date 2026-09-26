@@ -67,6 +67,14 @@ option(FAST_SYS_CLK_320 "Run clk_sys at 320 MHz with clk_hstx on PLL_USB" ON)
 # trim the handler's SRAM traffic or to move pop-on-read into the PIO.
 option(VIDEO_SCANOUT "Run the scan-out DMA (OFF = dark display, measurement only)" ON)
 
+# On-hardware self-tests (console "selftest"). Default ON, including Release:
+# they are flash-resident, cost no SRAM (they scratch in PSRAM and the
+# framebuffer, which matters -- the device-role build has ~648 bytes of SRAM
+# left), and run only when an operator asks. Debug-only was considered and
+# rejected: the flashed images are RelWithDebInfo/ATfE, so gating on a build
+# type risks the tests existing only in binaries nobody runs. OFF drops them.
+option(SELFTEST "Compile in the on-hardware self-tests" ON)
+
 # PSRAM size is DETECTED, not taken from the board header, and the reason is
 # not fussiness. In the header-only path the SDK never calls
 # gpio_set_function(PICO_PSRAM_CS_PIN, GPIO_FUNC_XIP_CS1) at all -- that call
@@ -166,6 +174,7 @@ add_executable(pico-thing-video
 		src/vid_link.cpp
 		src/video.cpp
 		src/psram_bench.cpp
+		src/selftest.cpp
 		src/video_render.cpp
 )
 
@@ -179,6 +188,20 @@ else()
 endif()
 
 target_compile_definitions(pico-thing-video PRIVATE PICO_AUTO_DETECT_PSRAM_SIZE=1)
+
+if(SELFTEST)
+	target_compile_definitions(pico-thing-video PRIVATE SELFTEST=1)
+endif()
+
+# The BUILD IDENTITY, compiled in so the running board can say what it is.
+# This exists because it was got wrong in conversation: five agent trees were
+# Release while the image actually being flashed was RelWithDebInfo/ATfE, and
+# nothing in "status" could have settled it. A figure whose meaning depends on
+# the optimisation level -- which is most of them on that page -- is not
+# comparable between builds, so the page has to name its own build.
+target_compile_definitions(pico-thing-video PRIVATE
+	BUILD_TYPE_STR="${CMAKE_BUILD_TYPE}"
+	BUILD_CC_STR="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 
 if(NOT VIDEO_SCANOUT)
 	target_compile_definitions(pico-thing-video PRIVATE VIDEO_SCANOUT_OFF=1)

@@ -22,6 +22,7 @@ typedef enum cmd_tag {
 	CMD_FLOOD,
 	CMD_PRIORITY,
 	CMD_PSRAM,
+	CMD_SELFTEST,
 	CMD_STATUS,
 	CMD_POWER,
 	CMD_I2C_SCAN,

@@ -37,7 +37,12 @@
 
 set -u
 
-FW_TREES="build build-host build-192 build-atfe build-noscan"
+# build-rwdi-atfe matters more than its position suggests: RelWithDebInfo +
+# ATfE is the configuration Mark actually FLASHES, and it was missing from
+# this list until 2026-09-26. Every other tree is Release, which is a
+# different optimisation level, so a clean run here said nothing about the
+# image that goes on the board.
+FW_TREES="build build-host build-192 build-atfe build-noscan build-rwdi-atfe"
 USIM="${USIM_DIR:-$HOME/GitHub/usim}"
 JOBS="${JOBS:-8}"
 

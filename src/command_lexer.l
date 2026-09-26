@@ -81,6 +81,7 @@ match_command_keyword(const char *text)
 		{ "flood",   "fl", TOK_FLOOD   },
 		{ "priority","pr", TOK_PRIORITY},
 		{ "psram",   "ps", TOK_PSRAM   },
+		{ "selftest","se", TOK_SELFTEST},
 		{ "status",  "st", TOK_STATUS  },
 		{ "examine", "ex", TOK_EXAMINE },
 		{ "modify",  "mo", TOK_MODIFY  },

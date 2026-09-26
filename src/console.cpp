@@ -24,6 +24,28 @@
 #include "command_parser.h"
 #include "console.h"
 #include "psram_bench.h"
+#include "selftest.h"
+
+#if FAST_SYS_CLK_320
+#define BUILD_CLK  ", 320 MHz"
+#else
+#define BUILD_CLK  ", 192 MHz"
+#endif
+#if USB_HOST_MODE
+#define BUILD_USB  ", USB host"
+#else
+#define BUILD_USB  ", USB device"
+#endif
+#if SELFTEST
+#define BUILD_ST   ", selftest"
+#else
+#define BUILD_ST   ""
+#endif
+#if VIDEO_SCANOUT_OFF
+#define BUILD_SCAN ", NO SCANOUT"
+#else
+#define BUILD_SCAN ""
+#endif
 #include "hid_cook.h"
 #include "i2c_service.h"
 #include "pico_thing_video.h"
@@ -85,6 +107,29 @@ print_status()
 	       verbose ? "on" : "off");
 #endif
 	chip_stepping_print();
+
+	/* WHAT THIS BUILD IS, on the page where its numbers are read.
+	 *
+	 * Nearly every figure below depends on how the image was compiled --
+	 * the ISR cycle counts, the render timings, the worst service
+	 * interval -- so comparing two runs without knowing the build compares
+	 * nothing. That was not hypothetical: a whole exchange was spent at
+	 * cross purposes because one side assumed Release and the flashed
+	 * image was RelWithDebInfo/ATfE, which is a different optimisation
+	 * level. The toolchain matters for the same reason and is not
+	 * cosmetic: the hot blitter's O3 attribute is gcc-only by
+	 * construction, so the two compilers genuinely differ on the hot path.
+	 *
+	 * The options that change what the numbers MEAN are here too, rather
+	 * than scattered: a dark display makes the frame figures structurally
+	 * zero, and the clock is the single biggest term in any of them. */
+	/* Assembled by STRING CONCATENATION rather than by threading #if
+	 * blocks through the argument list. The interleaved form works but
+	 * makes the reader count %s against conditionally-present arguments by
+	 * hand, which is how a format bug gets written; here the conditionals
+	 * cannot affect the argument count at all. */
+	printf("Build:       %s, %s" BUILD_CLK BUILD_USB BUILD_ST BUILD_SCAN "\n",
+	       BUILD_TYPE_STR, BUILD_CC_STR);
 
 	/* The clock tree, MEASURED rather than assumed. Two bugs in a row came
 	 * from a clock quietly moving when a PLL was re-pointed underneath it:
@@ -161,6 +206,19 @@ process_command(char *buf)
 		       " again and compare\n");
 		break;
 	}
+
+	case CMD_SELFTEST:
+#if SELFTEST
+		selftest_run();
+#else
+		/* Deliberately a real answer rather than "Unknown command".
+		 * A operator who types this and is told the command does not
+		 * exist will conclude the firmware has no self-tests, which is
+		 * a different and wrong fact. */
+		printf("This image has no self-tests"
+		       " (configure -DSELFTEST=ON).\n");
+#endif
+		break;
 
 	case CMD_PSRAM:
 		/* Destructive, and the renderer must not be drawing into the
@@ -240,6 +298,7 @@ status_done:
 		"  flood              (fl)  feed the input FIFO continuously (measurement)\n"
 		"  priority           (pr)  toggle scan-out DMA priority over the cores\n"
 		"  psram              (ps)  time and verify PSRAM (overwrites the graphics shadow)\n"
+		"  selftest           (se)  on-hardware tests usim cannot make (DESTRUCTIVE)\n"
 		"  help               (h)   this text\n"
 		"\nThe peripheral follows the main 5V rail: bus and video serve only\n"
 		"while it is up; on power loss the firmware restarts into standby\n"

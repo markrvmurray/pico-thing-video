@@ -100,6 +100,7 @@ static int      _byte_count;
 %token TOK_FLOOD
 %token TOK_PRIORITY
 %token TOK_PSRAM
+%token TOK_SELFTEST
 %token TOK_STATUS
 %token TOK_EXAMINE
 %token TOK_MODIFY
@@ -128,6 +129,7 @@ command:
 	| flood_cmd
 	| priority_cmd
 	| psram_cmd
+	| selftest_cmd
 	| status_cmd
 	| examine_cmd
 	| modify_cmd
@@ -165,6 +167,10 @@ priority_cmd:
 
 psram_cmd:
 	TOK_PSRAM { result->tag = CMD_PSRAM; }
+	;
+
+selftest_cmd:
+	TOK_SELFTEST { result->tag = CMD_SELFTEST; }
 	;
 
 /* -----------------------------------------------------------------------
