@@ -418,6 +418,12 @@ vid_link_init(void)
 	vid_link_reset();		/* also homes the mouse snapshot */
 }
 
+extern "C" bool
+vid_link_input_pending(void)
+{
+	return rx_level() != 0u;
+}
+
 extern "C" void
 vid_link_input(uint8_t byte)
 {

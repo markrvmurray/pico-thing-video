@@ -157,6 +157,61 @@ uk_cook(uint8_t kc, bool shift, bool caps)
 static uint8_t kbd_prev[6];
 static bool    caps_lock;
 
+/* AUTO-REPEAT. A USB keyboard does not repeat: it reports which keys are
+ * held, and usually only when that changes, so repeat is the host's job --
+ * and it has to be THIS host's. The guest receives plain bytes with no
+ * key-up, so it never learns that a key is still held and could not repeat
+ * one if it tried.
+ *
+ * One key repeats: the most recent to go down that produced a byte. Any new
+ * key-down ends the current repeat (as on a PC), and a release ends it too.
+ * Not repeated: Caps Lock, and the function keys -- they are the guest's to
+ * spend on things like switching windows, and a held F-key cycling windows
+ * is not a feature. A repeat produces what the key produces NOW, with the
+ * modifiers of the latest report, so pressing Shift mid-repeat changes case.
+ *
+ * TIME IS PUSHED IN (hid_cook_tick), like the echo flag, so this file stays
+ * portable and the simulator can drive a virtual clock. The repeat is ARMED
+ * on the first tick after the key-down -- microseconds later on the board --
+ * so the report handler needs no clock of its own.
+ *
+ * A REPEAT WAITS FOR THE GUEST. While the guest has an unread input byte no
+ * repeat is queued; it goes out as soon as the byte is taken. Without that, a
+ * busy guest lets repeats pile up in the input FIFO and the key keeps
+ * "repeating" after it is released -- the cursor overshoots, the scroll runs
+ * on. A slow guest therefore gets a slower repeat, never a backlog. */
+#define KEY_REPEAT_DELAY_MS	500u
+#define KEY_REPEAT_INTERVAL_MS	50u	/* 20 a second */
+
+static uint8_t  rpt_key;	/* usage repeating, 0 = none */
+static uint8_t  rpt_mod;	/* modifiers of the latest report */
+static bool     rpt_armed;	/* rpt_due is set */
+static uint32_t rpt_due;	/* ms: next repeat due */
+
+/* What key `kc` produces with modifiers `mod`: the UK layout, then Ctrl
+ * chords folded onto the C0 controls the shell's editing characters live
+ * in. 0 for a key that produces nothing. */
+static uint8_t
+cook_key(uint8_t kc, uint8_t mod)
+{
+	const bool shift = (mod & (MOD_LEFTSHIFT | MOD_RIGHTSHIFT)) != 0;
+	const bool ctrl  = (mod & (MOD_LEFTCTRL  | MOD_RIGHTCTRL))  != 0;
+	uint8_t c = uk_cook(kc, shift, caps_lock);
+
+	if (ctrl && c != 0) {
+		uint8_t u = (c >= 'a' && c <= 'z') ? (uint8_t)(c - 0x20) : c;
+		if (u >= 0x40 && u <= 0x5F)
+			c = (uint8_t)(u & 0x1F);
+	}
+	return c;
+}
+
+static inline bool
+repeats(uint8_t c)
+{
+	return c != 0 && (c < KEY_FN_BASE || c > KEY_FN_BASE + 11u);
+}
+
 static bool
 was_held(uint8_t kc)
 {
@@ -176,8 +231,17 @@ hid_cook_keyboard(const uint8_t *report, unsigned len)
 	/* report[1] is reserved. */
 	const uint8_t *keys = &report[2];
 
-	const bool shift = (mod & (MOD_LEFTSHIFT | MOD_RIGHTSHIFT)) != 0;
-	const bool ctrl  = (mod & (MOD_LEFTCTRL  | MOD_RIGHTCTRL))  != 0;
+	/* ErrorRollOver (and the other two error usages, 0x02 and 0x03): too
+	 * many keys are down for the keyboard to say which. It is NOT a report
+	 * of what is held, so it must not become the previous state -- it did,
+	 * and the next ordinary report then made every held key look newly
+	 * pressed and typed each of them again. Ignore it whole; the next real
+	 * report carries on from the last real one. */
+	for (int i = 0; i < 6; i++)
+		if (keys[i] >= 0x01u && keys[i] <= 0x03u)
+			return;
+
+	rpt_mod = mod;
 
 	for (int i = 0; i < 6; i++) {
 		const uint8_t kc = keys[i];
@@ -186,25 +250,61 @@ hid_cook_keyboard(const uint8_t *report, unsigned len)
 		if (was_held(kc))
 			continue;	/* held from last report, not a new down */
 
+		/* A new key-down, of any kind, ends the current repeat. */
+		rpt_key = 0;
+
 		if (kc == KEY_CAPS_LOCK) {
 			caps_lock = !caps_lock;	/* toggle on press */
 			continue;
 		}
 
-		uint8_t c = uk_cook(kc, shift, caps_lock);
-		/* Ctrl chords: fold letters (and the usual @[\]^_ range) onto
-		 * the C0 controls the shell's editing characters live in. */
-		if (ctrl && c != 0) {
-			uint8_t u = (c >= 'a' && c <= 'z') ? (uint8_t)(c - 0x20) : c;
-			if (u >= 0x40 && u <= 0x5F)
-				c = (uint8_t)(u & 0x1F);
-		}
+		const uint8_t c = cook_key(kc, mod);
+
 		if (c != 0)
 			emit_key(c);
+		if (repeats(c)) {
+			rpt_key = kc;
+			rpt_armed = false;	/* the next tick starts the delay */
+		}
+	}
+
+	/* A released key stops repeating. */
+	if (rpt_key != 0) {
+		bool held = false;
+
+		for (int i = 0; i < 6; i++)
+			held = held || keys[i] == rpt_key;
+		if (!held)
+			rpt_key = 0;
 	}
 
 	for (int i = 0; i < 6; i++)
 		kbd_prev[i] = keys[i];
+}
+
+void
+hid_cook_tick(uint32_t now_ms)
+{
+	if (rpt_key == 0)
+		return;
+	if (!rpt_armed) {
+		rpt_armed = true;
+		rpt_due = now_ms + KEY_REPEAT_DELAY_MS;
+		return;
+	}
+	/* Wrap-safe: the difference is taken unsigned and read signed. */
+	if ((int32_t)(now_ms - rpt_due) < 0)
+		return;
+	if (vid_link_input_pending())
+		return;		/* the guest has not taken the last one yet */
+
+	const uint8_t c = cook_key(rpt_key, rpt_mod);
+
+	if (repeats(c))
+		emit_key(c);
+	/* From NOW, not from when it was due: a repeat held back by a slow
+	 * guest must not be followed by a burst catching up. */
+	rpt_due = now_ms + KEY_REPEAT_INTERVAL_MS;
 }
 
 /* ======================================================================== *
@@ -291,6 +391,9 @@ hid_cook_reset(void)
 	for (int i = 0; i < 6; i++)
 		kbd_prev[i] = 0;
 	caps_lock = false;
+	rpt_key = 0;
+	rpt_mod = 0;
+	rpt_armed = false;
 	cursor_x = FB_WIDTH  / 2;
 	cursor_y = FB_HEIGHT / 2;
 }

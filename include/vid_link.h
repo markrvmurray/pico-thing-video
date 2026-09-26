@@ -258,6 +258,11 @@ void vid_link_mouse_print(void);
  * loopback, the only other producer, is a test mode). Drops when full. */
 void vid_link_input(uint8_t byte);
 
+/* True while the guest has input it has not yet read. Core 0, for the
+ * keyboard's auto-repeat, which holds a repeat back rather than queue one
+ * behind an unread byte. */
+bool vid_link_input_pending(void);
+
 /* Console diagnostics (Core 0; reads counters only). */
 void vid_link_print_status(void);
 

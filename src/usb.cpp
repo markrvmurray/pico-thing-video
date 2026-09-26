@@ -6,6 +6,7 @@
 #include "bsp/board.h"
 #include "tusb.h"
 #include "usb.h"
+#include "hid_cook.h"
 #include "pico_thing_video.h"
 
 // --- USB optional init / force enumeration ---
@@ -213,6 +214,9 @@ usb_poll(void)
 {
 #if USB_HOST_MODE
 	tuh_task();
+	/* The keyboard's auto-repeat clock. Reports cannot drive it: a
+	 * keyboard sends nothing while a key is simply held. */
+	hid_cook_tick(to_ms_since_boot(get_absolute_time()));
 #if defined(PIMORONI_PGA2350)
 	// TPS2051B !FLT while sourcing VBUS: log each edge, not each poll.
 	static bool faulted = false;

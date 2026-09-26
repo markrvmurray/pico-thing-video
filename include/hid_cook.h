@@ -42,6 +42,11 @@ void hid_cook_mouse(const uint8_t *report, unsigned len);
  * the flag is pushed in so this module stays free of console knowledge. */
 void hid_cook_set_echo(bool on);
 
+/* Keyboard auto-repeat's clock: call often (every pass round the loop that
+ * polls USB), with a millisecond count that may wrap. The time is PUSHED IN
+ * so the cooker stays portable and a simulator can drive a virtual clock. */
+void hid_cook_tick(uint32_t now_ms);
+
 /* Forget held keys and centre the cursor. */
 void hid_cook_reset(void);
 
