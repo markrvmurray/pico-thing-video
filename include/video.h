@@ -186,7 +186,10 @@ void vidterm_select_cursor(uint8_t group, uint8_t id);
 void vidterm_set_bold(bool on);
 
 void vidterm_flood_fill(int x, int y, uint8_t colour);
-void vidterm_fill_stats(uint32_t *overflows);
+/* overflows: flood-fill seeds dropped (the fill is then incomplete).
+ * unpatterned: spans of a patterned or mix-mode FFill filled SOLID because the
+ * span log was full or absent. Both must read zero; each is a visible fault. */
+void vidterm_fill_stats(uint32_t *overflows, uint32_t *unpatterned);
 void vidterm_clear_graphics(uint8_t colour);
 
 #ifdef __cplusplus

@@ -166,11 +166,17 @@ core0_load_print(void)
 	// Zero here is the expected reading. A non-zero count means a flood
 	// fill ran out of seeds and left a region part-filled, which is
 	// visible on screen but easy to blame on the guest's geometry.
-	uint32_t fill_over;
-	vidterm_fill_stats(&fill_over);
+	uint32_t fill_over, fill_flat;
+	vidterm_fill_stats(&fill_over, &fill_flat);
 	if (fill_over != 0u)
 		printf("Flood fill:  %lu seeds DROPPED — fills were incomplete\n",
 		       (unsigned long)fill_over);
+	// Spans of a patterned or mix-mode fill left solid because the span log
+	// ran out: a visible unpatterned patch, and zero is the only acceptable
+	// reading.
+	if (fill_flat != 0u)
+		printf("Flood fill:  %lu spans filled SOLID — pattern/mix not"
+		       " applied there\n", (unsigned long)fill_flat);
 	// Buffer pool: whether a DefGPB actually got its storage, and how
 	// much of the pool is gone. Reported because a buffer that was never
 	// allocated behaves exactly like one that was and then drew nothing,

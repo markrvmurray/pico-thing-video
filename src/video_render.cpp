@@ -16,6 +16,7 @@
 #include "video.h"
 #include "video_render.h"
 #include "gfx_shadow.h"
+#include "fill_log.h"
 #include "gfx_bufs.h"
 #include "font_spleen_8x16.h"
 
@@ -896,22 +897,33 @@ void vidterm_set_clip(int x, int y, int w, int h)
  * and did not. */
 #define PATTERN_CACHE_BYTES	256u	/* a 16x16 weave, the usual size */
 
-/* A pattern applies to FILLED primitives and to nothing else -- Bar, the
- * filled curves, FFill. Not to a point, a line, an outline, or a stamped
- * block, all of which carry their own colour and mean it.
+/* THE PATTERN RULE, taken from CoCo3's GrfDrv (level2/cmds/grfdrv.asm) rather
+ * than from memory -- a first version here got it wrong twice:
  *
- * This was applied in the single pixel writer that every primitive goes
- * through, so it replaced the colour of everything: lines and outlines came
- * out woven, and PutBlk stamped the pattern instead of the image it was given.
- * From the screen that reads as a patch of pattern with no relation to what
- * surrounds it -- which is how it was reported. Meanwhile FFill, which the
- * contract says IS patterned, was the one fill that missed out, because it
- * writes spans directly rather than through the writer.
+ *  SCOPE: every primitive that plots pixels goes through the pattern -- Point,
+ *    Line, Box, Bar, the curves outlined and filled, FFill, AND PutBlk. The
+ *    only exemption on CoCo3 is the graphics cursor; here the cursor and the
+ *    mouse pointer are overlays that never pass through this writer at all.
+ *  COMBINE: the pixel written is colour AND pattern-pixel, then the mix mode.
+ *    CoCo3 ANDs palette indices; this plane is direct RGB332, so the bytes
+ *    are ANDed -- with a white foreground the pattern's own colours show
+ *    verbatim, and where the pattern is 0 the pixel becomes 0 (CoCo3 writes
+ *    colour 0 there too; it is not transparent). For PutBlk "colour" is the
+ *    SOURCE pixel, so a stamp is the image ANDed with the pattern.
+ *  ANCHOR: the tile is indexed from the WINDOW origin and follows each pixel
+ *    as it is plotted, so abutting fills in a window line up.
  *
- * Inverted in both directions at once, which is what comes of putting a
- * decision in the place everything passes through rather than in the places
- * that mean it. */
-static bool          fill_patterned;
+ * Two deliberate divergences, both Pico extensions: the tile is whatever size
+ * its buffer is (CoCo3 always reads 32x8), and PutBlk tiles per pixel --
+ * GrfDrv's slow PUT never advances its pattern index, freezing one pattern
+ * byte across the whole block, which looks like an oversight (agreed with
+ * Mark 2026-09-26).
+ *
+ * The history, because it will look tempting again. First the pattern
+ * REPLACED the colour in the writer everything shares, so a stamp showed the
+ * pattern instead of its image; then it was confined to fills (1943bae),
+ * which hid that bug by removing the pattern from everything CoCo3 patterns.
+ * Both were wrong. VID-033. */
 
 static uint8_t       pattern_cache[PATTERN_CACHE_BYTES];
 static const uint8_t *pattern_data;	/* cache, or straight into PSRAM */
@@ -954,17 +966,25 @@ void vidterm_set_logic(uint8_t mode)
 }
 
 /* One pixel, in ABSOLUTE coordinates, already known to be inside the clip. */
-static inline uint8_t pattern_at(int px, int py, uint8_t fallback)
+static inline uint8_t pattern_apply(int px, int py, uint8_t colour)
 {
-    if (!fill_patterned)
-        return fallback;
-    return pattern_data[(size_t)(py % pattern_h) * pattern_w +
-                        (px % pattern_w)];
+    if (!pattern_on)
+        return colour;
+    /* Window-relative, and wrapped properly: an unprotected window may draw
+     * left of or above its own origin, where a plain % goes negative. */
+    int tx = (px - origin_x) % pattern_w;
+    int ty = (py - origin_y) % pattern_h;
+
+    if (tx < 0)
+        tx += pattern_w;
+    if (ty < 0)
+        ty += pattern_h;
+    return (uint8_t)(colour & pattern_data[(size_t)ty * pattern_w + tx]);
 }
 
 static inline void put_pixel_abs(int px, int py, uint8_t src)
 {
-    const uint8_t colour = pattern_at(px, py, src);
+    const uint8_t colour = pattern_apply(px, py, src);
     uint8_t v = colour;
 
     if (logic_mode != LOGIC_NORMAL) {
@@ -1004,7 +1024,6 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
 
     const size_t span = (size_t)(px1 - px0);
 
-    fill_patterned = pattern_on;
 
     /* THE WHOLE PANEL makes the shadow uniform by definition, so it needs no
      * shadow traffic at all -- just a new uniform colour and every row marked
@@ -1026,11 +1045,10 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
      * could be, at one byte a row -- see the fill below, which is the case
      * that would benefit.) */
     if (px0 == 0 && px1 == FB_WIDTH && py0 == 0 && py1 == FB_HEIGHT &&
-        logic_mode == LOGIC_NORMAL && !fill_patterned) {
+        logic_mode == LOGIC_NORMAL && !pattern_on) {
         memset(&video_framebuffer[0][0], colour,
                (size_t)FB_WIDTH * (size_t)FB_HEIGHT);
         vidterm_shadow_reset(colour);
-        fill_patterned = false;
         return;
     }
 
@@ -1038,12 +1056,11 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
      * rectangle is one run of memory rather than one per row. A cleared
      * screen or a full-width bar is the common large fill, and it is the
      * case where the per-row call overhead would be most of what is left. */
-    if (px0 == 0 && px1 == FB_WIDTH && logic_mode == LOGIC_NORMAL && !fill_patterned) {
+    if (px0 == 0 && px1 == FB_WIDTH && logic_mode == LOGIC_NORMAL && !pattern_on) {
         memset(&video_framebuffer[py0][0], colour,
                span * (size_t)(py1 - py0));
         for (int row = py0; row < py1; row++)
             shadow_fill_span(0, FB_WIDTH, row, colour);
-        fill_patterned = false;
         return;
     }
 
@@ -1052,7 +1069,7 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
      * whole-panel bar is half a million pixels, and at 33 ms it outlasted a
      * frame on the core that owes the overlay service its deadline. */
     for (int row = py0; row < py1; row++) {
-        if (logic_mode == LOGIC_NORMAL && !fill_patterned) {
+        if (logic_mode == LOGIC_NORMAL && !pattern_on) {
             memset(&video_framebuffer[row][px0], colour, span);
             shadow_fill_span(px0, px1, row, colour);
         } else {
@@ -1060,7 +1077,6 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
                 put_pixel_abs(i, row, colour);
         }
     }
-    fill_patterned = false;
 }
 
 void vidterm_hline(int x, int y, int len, uint8_t colour)
@@ -1071,7 +1087,7 @@ void vidterm_hline(int x, int y, int len, uint8_t colour)
     int px1 = origin_x + x + len; if (px1 > clip_x1) px1 = clip_x1;
     if (px1 <= px0)
         return;
-    if (logic_mode == LOGIC_NORMAL && !fill_patterned) {
+    if (logic_mode == LOGIC_NORMAL && !pattern_on) {
         memset(&video_framebuffer[py][px0], colour, (size_t)(px1 - px0));
         shadow_fill_span(px0, px1, py, colour);
     } else {
@@ -1203,11 +1219,6 @@ void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
         return;
     }
 
-    /* A fill, so the pattern applies -- and it must be set around the whole
-     * shape rather than per span, or each row would decide separately. */
-    const bool was = fill_patterned;
-
-    fill_patterned = pattern_on;
 
     for (int dy = -ry; dy <= ry; dy++) {
         /* half-width = rx * sqrt(ry^2 - dy^2) / ry, kept in integers. The
@@ -1218,7 +1229,6 @@ void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
 
         vidterm_hline(cx - dx, cy + dy, 2 * dx + 1, colour);
     }
-    fill_patterned = was;
 }
 
 /* Record a loaded bitmap's shape and take its bytes. The payload arrives a
@@ -1342,7 +1352,7 @@ void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y)
      * bulk -- take the per-pixel path, which is also the one that defines
      * what those modes MEAN. Correctness first: this is the fallback, and it
      * is the original routine unchanged. */
-    if (logic_mode != LOGIC_NORMAL || fill_patterned) {
+    if (logic_mode != LOGIC_NORMAL || pattern_on) {
         for (int row = 0; row < h; row++)
             for (int col = 0; col < w; col++)
                 plot_unlocked(x + col, y + row,
@@ -1415,23 +1425,25 @@ void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y)
 #define FILL_STACK_MAX	96u
 
 static struct { int16_t x, y; } fill_stack[FILL_STACK_MAX];
-static uint32_t fill_overflows;
+static uint32_t fill_overflows;		/* seeds dropped */
+static uint32_t fill_log_overflows;	/* spans filled solid, not patterned */
 
-void vidterm_fill_stats(uint32_t *overflows)
+void vidterm_fill_stats(uint32_t *overflows, uint32_t *unpatterned)
 {
     *overflows = fill_overflows;
+    *unpatterned = fill_log_overflows;
+}
+
+/* A span in one word, for the PSRAM log: row, first and last column. */
+static inline uint32_t span_pack(int y, int x1, int x2)
+{
+    return ((uint32_t)y << 20) | ((uint32_t)x1 << 10) | (uint32_t)x2;
 }
 
 static inline void fill_span_abs(int px0, int px1, int py, uint8_t colour)
 {
-    /* A flood fill IS a fill, so it takes the pattern -- and it used to be
-     * the one that did not, because it writes spans straight out rather than
-     * through the pixel writer. */
-    if (fill_patterned || logic_mode != LOGIC_NORMAL) {
-        for (int i = px0; i < px1; i++)
-            put_pixel_abs(i, py, colour);
-        return;
-    }
+    /* The plain case only: vidterm_flood_fill() routes patterned and
+     * mix-mode fills through its two-pass path instead. */
     memset(&video_framebuffer[py][px0], colour, (size_t)(px1 - px0));
     shadow_fill_span(px0, px1, py, colour);
 }
@@ -1452,7 +1464,23 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
     if (target == colour)
         return;
 
-    fill_patterned = pattern_on;
+    /* TWO PASSES when the pixels written are not simply `colour` (VID-034).
+     * This fill finds its way BY COLOUR -- a pixel equal to the target is
+     * one it has not reached -- and a pattern or mix mode breaks that: a
+     * pixel just filled can still equal the target (white AND a black
+     * pattern pixel, on black), so it re-seeds its own work, overflows the
+     * seed stack and quits with most of the region untouched. Measured on
+     * the host before this: 6,144 of 491,520 pixels.
+     *
+     * So pass 1 floods SOLID -- guaranteed to terminate, since every filled
+     * pixel then differs from the target -- into the framebuffer ONLY,
+     * logging each span. Pass 2 repaints exactly those spans through the
+     * ordinary pixel path, pattern and mix mode applied, framebuffer and
+     * shadow. Pass 1 leaves the shadow alone, so a mix mode still combines
+     * with the true background. The plain fill keeps its single pass. */
+    const bool plain = !pattern_on && logic_mode == LOGIC_NORMAL;
+    uint32_t *const log = plain ? NULL : fill_log_base();
+    uint32_t logged = 0;
 
     unsigned sp = 0;
     fill_stack[sp].x = (int16_t)sx;
@@ -1475,7 +1503,20 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
         while (x2 < clip_x1 - 1 && video_framebuffer[py][x2 + 1] == target)
             x2++;
 
-        fill_span_abs(x1, x2 + 1, py, colour);
+        if (plain) {
+            fill_span_abs(x1, x2 + 1, py, colour);
+        } else {
+            memset(&video_framebuffer[py][x1], colour, (size_t)(x2 + 1 - x1));
+            if (log != NULL && logged < FILL_LOG_SPANS) {
+                log[logged++] = span_pack(py, x1, x2);
+            } else {
+                /* Past the log's end, or no PSRAM: this span stays solid.
+                 * Visibly unpatterned, but consistent -- the shadow gets
+                 * the same bytes -- and COUNTED, like a dropped seed. */
+                shadow_fill_span(x1, x2 + 1, py, colour);
+                fill_log_overflows++;
+            }
+        }
 
         /* One seed per RUN on each neighbouring row, not per pixel: after
          * seeding a run, skip to its end. That is the whole economy of the
@@ -1501,7 +1542,17 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
             }
         }
     }
-    fill_patterned = false;
+
+    /* Pass 2: exactly the spans pass 1 claimed, through the pixel path. */
+    for (uint32_t i = 0; i < logged; i++) {
+        const uint32_t w = log[i];
+        const int py = (int)(w >> 20);
+        const int x1 = (int)((w >> 10) & 0x3FFu);
+        const int x2 = (int)(w & 0x3FFu);
+
+        for (int px = x1; px <= x2; px++)
+            put_pixel_abs(px, py, colour);
+    }
 }
 
 void vidterm_circle(int cx, int cy, int radius, uint8_t colour)

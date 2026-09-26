@@ -19,6 +19,7 @@
 #include "gfx_bufs.h"
 #include "win_store.h"
 #include "cmd_trace.h"
+#include "fill_log.h"
 #include "video.h"
 #include "video_render.h"
 
@@ -95,7 +96,7 @@ test_psram_layout(void)
 
 	/* Declared sizes against the part. */
 	const size_t want = GFX_SHADOW_BYTES + GFX_BUFPOOL_BYTES +
-	    CMD_TRACE_BYTES +
+	    CMD_TRACE_BYTES + FILL_LOG_BYTES +
 	    (size_t)win_store_slots() * WIN_STORE_SLOT_BYTES;
 
 	snprintf(d, sizeof(d), "need %u KB of %u KB",
@@ -120,6 +121,7 @@ test_psram_layout(void)
 		{ "shadow", (uintptr_t)shadow, GFX_SHADOW_BYTES },
 		{ "bufs", (uintptr_t)bufs, GFX_BUFPOOL_BYTES },
 		{ "trace", (uintptr_t)cmd_trace_base(), CMD_TRACE_BYTES },
+		{ "filllog", (uintptr_t)fill_log_base(), FILL_LOG_BYTES },
 		{ "windows", (uintptr_t)win_store_slot(0),
 		    (size_t)win_store_slots() * WIN_STORE_SLOT_BYTES },
 	};
