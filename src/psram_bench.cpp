@@ -32,6 +32,7 @@
 #include "hardware/dma.h"
 
 #include "gfx_shadow.h"
+#include "video_render.h"	/* video_framebuffer: the SRAM fill target */
 
 /* Measured over a middling run: long enough that the timer's granularity is
  * irrelevant, short enough not to stall the console for a human-noticeable
@@ -200,8 +201,95 @@ psram_bench(void)
 			    n);
 			report(label, time_us_32() - t0, iters * n, iters);
 		}
-		dma_channel_unclaim((uint)ch);
 	}
+
+	/* LARGE FILLS: core against DMA, in SRAM and in PSRAM.
+	 *
+	 * Fills are the renderer's biggest single operations -- a panel clear
+	 * is 480 KB of framebuffer -- and they had been running through a C
+	 * library memset that moved one byte per iteration (every library ATfE
+	 * ships is a size build). The firmware now supplies its own, word-wise.
+	 * These rows say what that bought, and whether DMA would buy more.
+	 *
+	 * DMA fills by reading ONE word over and over (read increment off) and
+	 * writing words with the increment on. Per byte it may only tie the
+	 * core, as the DMA copies above do; the case for it is that the core is
+	 * free meanwhile. The "byte loop" row reproduces the old library's
+	 * inner loop, so the before-and-after is on the page rather than in
+	 * someone's memory.
+	 *
+	 * The framebuffer is overwritten, so the panel goes solid for a moment;
+	 * the closing line already tells the operator to clear the screen. */
+	{
+		uint8_t *fb = &video_framebuffer[0][0];
+		const size_t fb_bytes = (size_t)FB_WIDTH * (size_t)FB_HEIGHT;
+		static const uint32_t fill_word = 0x24242424u;
+		const struct {
+			const char *where;
+			volatile uint8_t *base;
+			size_t bytes;
+		} regions[] = {
+			{ "SRAM fb", fb, fb_bytes },
+			{ "PSRAM", p8, GFX_SHADOW_BYTES },
+		};
+
+		for (unsigned ri = 0; ri < 2; ri++) {
+			volatile uint8_t *b = regions[ri].base;
+			const size_t nbytes = regions[ri].bytes;
+			char label[40];
+
+			/* The old library's loop, reproduced: one strb a turn.
+			 * volatile so the compiler cannot widen it for us. */
+			t0 = time_us_32();
+			for (size_t i = 0; i < nbytes; i++)
+				b[i] = 0x11u;
+			snprintf(label, sizeof(label), "fill %s, byte loop",
+			    regions[ri].where);
+			report(label, time_us_32() - t0, (uint32_t)nbytes, 1u);
+
+			t0 = time_us_32();
+			memset((void *)b, 0x22, nbytes);
+			snprintf(label, sizeof(label), "fill %s, memset",
+			    regions[ri].where);
+			report(label, time_us_32() - t0, (uint32_t)nbytes, 1u);
+
+			if (ch >= 0) {
+				dma_channel_config f =
+				    dma_channel_get_default_config((uint)ch);
+
+				channel_config_set_transfer_data_size(&f,
+				    DMA_SIZE_32);
+				channel_config_set_read_increment(&f, false);
+				channel_config_set_write_increment(&f, true);
+				t0 = time_us_32();
+				dma_channel_configure((uint)ch, &f, (void *)b,
+				    &fill_word, (uint)(nbytes / 4u), true);
+				dma_channel_wait_for_finish_blocking((uint)ch);
+				snprintf(label, sizeof(label), "fill %s, DMA",
+				    regions[ri].where);
+				report(label, time_us_32() - t0,
+				    (uint32_t)nbytes, 1u);
+			}
+
+			/* A fill that reported a time but did not fill is the
+			 * failure every instrument here has to rule out. The
+			 * last method run must have left its word throughout;
+			 * checked at the start, middle and end. */
+			const uint8_t want = (ch >= 0) ? 0x24u : 0x22u;
+			if (b[0] != want || b[nbytes / 2] != want ||
+			    b[nbytes - 1] != want)
+				printf("  *** fill %s did NOT land (%02X %02X %02X,"
+				       " want %02X) — timings meaningless ***\n",
+				    regions[ri].where, b[0], b[nbytes / 2],
+				    b[nbytes - 1], want);
+		}
+	}
+
+	/* Held across the copies AND the fills, released once here: releasing
+	 * it after the copies (as a first draft did) would have left the fill
+	 * section programming a channel it no longer owned. */
+	if (ch >= 0)
+		dma_channel_unclaim((uint)ch);
 
 	/* Defeat the dead-store elimination that would otherwise delete the
 	 * 32-bit read loop outright and report it as infinitely fast. An
