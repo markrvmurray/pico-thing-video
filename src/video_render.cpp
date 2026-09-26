@@ -554,8 +554,12 @@ cell_row_get(const uint8_t *src, uint32_t *w0, uint32_t *w1)
 /* sbase is the graphics shadow, fetched ONCE per refresh by the caller rather
  * than once per cell -- or, as it was, once per background PIXEL through
  * shadow_peek(), each a call into another translation unit that itself called
- * win_store_slots(). */
-static void
+ * win_store_slots().
+ *
+ * FORCED INLINE, on measurement. With one call site clang inlined it; the run
+ * path gave it a second, clang then kept it out of line, and a full opaque
+ * refresh -- 3840 calls -- went from 6.19 to 6.68 ms on hardware. */
+static inline __attribute__((always_inline)) void
 blit_char_cell(int col, int row, const uint8_t *sbase)
 {
     uint8_t ch   = text_cells[row][col];
@@ -648,9 +652,11 @@ blit_char_cell(int col, int row, const uint8_t *sbase)
  * paint_span() keeps. Wider would amortise the one strided open per slice a
  * little further; it is a small fraction of what remains.
  *
- * Only runs WITH a transparent cell come here with a reason to; a run
- * without one reads no PSRAM, and goes cell by cell as before, so opaque
- * text pays nothing for this. */
+ * The caller sends only text rows with a DRAWN shadow row among their
+ * sixteen, and a run with no transparent cell goes straight back to the
+ * per-cell path: in either case there is nothing to read, and taking the
+ * run path anyway cost opaque and undrawn-plane refreshes 6-7 % on
+ * hardware for no gain. */
 #define RUN_CELLS 8
 
 static void
@@ -660,6 +666,19 @@ blit_cell_run(int row, int c0, uint32_t bits, const uint8_t *sbase)
     uint8_t chs[RUN_CELLS];
     uint32_t transp = 0;
 
+    /* Transparency first, alone: a run without any must not pay for
+     * colours the per-cell path is about to work out again. */
+    for (uint32_t b = bits; b != 0u; b &= b - 1u) {
+        const int i = __builtin_ctz(b);
+
+        if ((text_attrs[row][c0 + i] & 0x01) != 0)
+            transp |= 1u << i;
+    }
+    if (transp == 0u) {
+        for (uint32_t b = bits; b != 0u; b &= b - 1u)
+            blit_char_cell(c0 + __builtin_ctz(b), row, sbase);
+        return;
+    }
     for (uint32_t b = bits; b != 0u; b &= b - 1u) {
         const int i = __builtin_ctz(b);
         const uint8_t attr = text_attrs[row][c0 + i];
@@ -667,13 +686,6 @@ blit_cell_run(int row, int c0, uint32_t bits, const uint8_t *sbase)
         chs[i] = text_cells[row][c0 + i];
         fgw[i] = (uint32_t)attr_to_fg(attr) * 0x01010101u;
         bgw[i] = (uint32_t)attr_to_bg(attr) * 0x01010101u;
-        if ((attr & 0x01) != 0 && sbase != NULL)
-            transp |= 1u << i;
-    }
-    if (transp == 0u) {
-        for (uint32_t b = bits; b != 0u; b &= b - 1u)
-            blit_char_cell(c0 + __builtin_ctz(b), row, sbase);
-        return;
     }
 
     /* The slice spans the first to the last TRANSPARENT cell; opaque cells
@@ -778,6 +790,25 @@ static bool render_dirty_rows(int max_rows)
             break;
         }
         rows_done++;
+
+        /* Runs pay off only where there is shadow to read: some pixel row
+         * of this text row drawn. Otherwise every cell's background is
+         * its own colour or the plane's uniform one, and the per-cell path
+         * finds either without reading anything. */
+        bool drawn = false;
+        if (sbase != NULL && shadow_any_real)
+            for (int gy = 0; gy < CHAR_H && !drawn; gy++)
+                drawn = shadow_row_real[row * CHAR_H + gy];
+        if (!drawn) {
+            for (int w = 0; w < DIRTY_WORDS; w++)
+                for (uint32_t b = dirty_rows[row][w]; b != 0u; b &= b - 1u) {
+                    blit_char_cell(w * 32 + __builtin_ctz(b), row, sbase);
+                    blitted++;
+                }
+            for (int w = 0; w < DIRTY_WORDS; w++)
+                dirty_rows[row][w] = 0;
+            continue;
+        }
 
         static_assert(32 % RUN_CELLS == 0 && TEXT_COLS % RUN_CELLS == 0,
                       "a run is a whole slice of one dirty word");
