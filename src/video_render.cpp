@@ -1000,6 +1000,116 @@ static inline void put_pixel_abs(int px, int py, uint8_t src)
     shadow_poke(px, py, v);
 }
 
+/* A shadow row about to be written from x0 to x1. When the span is the whole
+ * row there is nothing to preserve, so an undrawn row is marked real WITHOUT
+ * first being filled with its uniform colour -- a 1 KB PSRAM write that would
+ * be overwritten at once, and on a full-panel patterned fill that was 480 KB
+ * of wasted traffic. */
+static inline uint8_t *shadow_row_for_write(int y, int x0, int x1)
+{
+    uint8_t *base = gfx_shadow_base();
+
+    if (base == NULL)
+        return NULL;
+    if (!shadow_row_real[y] && x0 == 0 && x1 == FB_WIDTH) {
+        shadow_row_real[y] = true;
+        shadow_any_real = true;
+        return &base[(size_t)y * FB_WIDTH];
+    }
+    return shadow_row(y);
+}
+
+/* ONE SPAN of patterned and/or mixed pixels, x0..x1 absolute and already
+ * clipped: exactly what calling put_pixel_abs() for each pixel does, without
+ * paying for it per pixel (VID-035).
+ *
+ * The per-pixel path measured ~400 ns a pixel on hardware -- a full-panel
+ * patterned fill 195 ms, 11.7 frames in one render call, and wgfx's patterned
+ * Bar ~70 ms every run. Each pixel made two modulo operations, a call chain
+ * into another file for the shadow's base, and a single-byte uncached PSRAM
+ * write. The same shape the text blitter had before it was made word-wise.
+ *
+ * Here the span is composed IN THE FRAMEBUFFER ROW, which must be written
+ * anyway, so no staging array is needed beyond a 64-byte chunk for a PutBlk
+ * source (core 0's stack is 2 KB; a row-sized buffer would take half of it):
+ *   - the mix base comes from the shadow ONCE per chunk, as a word copy, or is
+ *     the uniform colour of an undrawn row -- read, never materialised;
+ *   - the pattern row is resolved once and stepped without division;
+ *   - the shadow gets ONE sequential word write for the whole span, which is
+ *     the cheap PSRAM access pattern.
+ * `src` is NULL for a constant colour, or a PutBlk's source row (which may be
+ * in PSRAM). The rule itself -- colour AND pattern, then the mix mode against
+ * the graphics plane, tiled from the window origin -- is unchanged; see the
+ * pattern notes above. */
+#define PAINT_CHUNK 64
+
+static void paint_span(int py, int x0, int x1, uint8_t colour, const uint8_t *src)
+{
+    uint8_t *const line = &video_framebuffer[py][0];
+    const uint8_t *const sbase = gfx_shadow_base();
+    const uint8_t *const srow_ro = (sbase != NULL && shadow_row_real[py]) ?
+        &sbase[(size_t)py * FB_WIDTH] : NULL;
+    const bool mixing = logic_mode != LOGIC_NORMAL;
+    const uint8_t *prow = NULL;
+    uint8_t prow_local[PAINT_CHUNK];
+    int tx = 0;
+
+    if (pattern_on) {
+        int ty = (py - origin_y) % pattern_h;
+
+        if (ty < 0)
+            ty += pattern_h;
+        prow = &pattern_data[(size_t)ty * (size_t)pattern_w];
+        /* A pattern too big for the SRAM cache is read from PSRAM; take
+         * its row into SRAM once rather than a byte per pixel. */
+        if (prow != &pattern_cache[(size_t)ty * (size_t)pattern_w] &&
+            pattern_w <= PAINT_CHUNK) {
+            copy_from_psram(prow_local, prow, (size_t)pattern_w);
+            prow = prow_local;
+        }
+        tx = (x0 - origin_x) % pattern_w;
+        if (tx < 0)
+            tx += pattern_w;
+    }
+
+    uint8_t tmp[PAINT_CHUNK];
+
+    for (int a = x0; a < x1; a += PAINT_CHUNK) {
+        const int n = (x1 - a < PAINT_CHUNK) ? x1 - a : PAINT_CHUNK;
+
+        if (src != NULL)
+            copy_from_psram(tmp, &src[a - x0], (size_t)n);
+        if (mixing) {
+            if (srow_ro != NULL)
+                copy_from_psram(&line[a], &srow_ro[a], (size_t)n);
+            else
+                memset(&line[a], shadow_uniform_colour, (size_t)n);
+        }
+        for (int i = 0; i < n; i++) {
+            uint8_t c = (src != NULL) ? tmp[i] : colour;
+
+            if (prow != NULL) {
+                c &= prow[tx];
+                if (++tx == pattern_w)
+                    tx = 0;
+            }
+            if (mixing) {
+                const uint8_t b = line[a + i];
+
+                c = (logic_mode == LOGIC_AND) ? (uint8_t)(b & c) :
+                    (logic_mode == LOGIC_OR) ? (uint8_t)(b | c) :
+                    (uint8_t)(b ^ c);
+            }
+            line[a + i] = c;
+        }
+    }
+
+    uint8_t *const srow = shadow_row_for_write(py, x0, x1);
+
+    if (srow != NULL)
+        copy_to_psram(&srow[x0], &line[x0], (size_t)(x1 - x0));
+}
+
 static inline void plot_unlocked(int x, int y, uint8_t colour)
 {
     const int px = origin_x + x, py = origin_y + y;
@@ -1023,7 +1133,6 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
         return;
 
     const size_t span = (size_t)(px1 - px0);
-
 
     /* THE WHOLE PANEL makes the shadow uniform by definition, so it needs no
      * shadow traffic at all -- just a new uniform colour and every row marked
@@ -1073,8 +1182,7 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
             memset(&video_framebuffer[row][px0], colour, span);
             shadow_fill_span(px0, px1, row, colour);
         } else {
-            for (int i = px0; i < px1; i++)
-                put_pixel_abs(i, row, colour);
+            paint_span(row, px0, px1, colour, NULL);
         }
     }
 }
@@ -1091,8 +1199,7 @@ void vidterm_hline(int x, int y, int len, uint8_t colour)
         memset(&video_framebuffer[py][px0], colour, (size_t)(px1 - px0));
         shadow_fill_span(px0, px1, py, colour);
     } else {
-        for (int i = px0; i < px1; i++)
-            put_pixel_abs(i, py, colour);
+        paint_span(py, px0, px1, colour, NULL);
     }
 }
 
@@ -1352,11 +1459,25 @@ void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y)
      * bulk -- take the per-pixel path, which is also the one that defines
      * what those modes MEAN. Correctness first: this is the fallback, and it
      * is the original routine unchanged. */
+    const int bx0 = origin_x + x;
+    const int blo = bx0 < clip_x0 ? clip_x0 : bx0;
+    const int bhi = bx0 + w > clip_x1 ? clip_x1 : bx0 + w;
+
+    /* A mix mode or a pattern makes each pixel depend on the background or
+     * on its position, so the source cannot simply be copied: each clipped
+     * row goes through the span writer, which applies both at span cost
+     * rather than per-pixel cost (VID-035). */
     if (logic_mode != LOGIC_NORMAL || pattern_on) {
-        for (int row = 0; row < h; row++)
-            for (int col = 0; col < w; col++)
-                plot_unlocked(x + col, y + row,
-                              p[(size_t)row * (size_t)w + col]);
+        if (bhi <= blo)
+            return;
+        for (int row = 0; row < h; row++) {
+            const int py = origin_y + y + row;
+
+            if (py < clip_y0 || py >= clip_y1)
+                continue;
+            paint_span(py, blo, bhi, 0,
+                       &p[(size_t)row * (size_t)w + (size_t)(blo - bx0)]);
+        }
         return;
     }
 
@@ -1550,8 +1671,7 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
         const int x1 = (int)((w >> 10) & 0x3FFu);
         const int x2 = (int)(w & 0x3FFu);
 
-        for (int px = x1; px <= x2; px++)
-            put_pixel_abs(px, py, colour);
+        paint_span(py, x1, x2 + 1, colour, NULL);
     }
 }
 
