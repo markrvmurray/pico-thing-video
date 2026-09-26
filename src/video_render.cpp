@@ -399,6 +399,74 @@ static inline void shadow_poke(int x, int y, uint8_t colour)
         row[x] = colour;
 }
 
+/* Copy to and from PSRAM with 32-BIT accesses, because memcpy will not.
+ *
+ * Measured on hardware (the "psram" console command): a single-byte read
+ * access costs 45 ns and a 32-bit read 93, which fits 29 ns fixed + 16 ns a
+ * byte -- so four bytes in one transaction is nearly twice as cheap per byte
+ * as one. memcpy does not exploit that at all: it managed 51 ns/byte reading
+ * and 36 writing, against 23 and 20 for the explicit loops below. It is
+ * behaving as though it were byte-at-a-time, and it cost this renderer half
+ * the available gain until it was measured.
+ *
+ * LONGER IS NOT BETTER, which kills the obvious next idea. memcpy measured
+ * FLAT at 32, 120 and 256 bytes (51/51/51 reading), so there is no burst mode
+ * to reach for by staging a whole block instead of a row -- and therefore no
+ * reason to want the kilobyte of SRAM that would have needed. Four bytes an
+ * access is the whole of the win; the asymptotic floor is 16 ns/byte and a
+ * word already reaches 23.
+ *
+ * The PSRAM SIDE is the one kept aligned, because it is the side that costs.
+ * The SRAM side takes whatever alignment falls out and is copied through
+ * __builtin_memcpy, which may become four byte stores -- to SRAM that is
+ * free, and it keeps the code honest about alignment instead of casting a
+ * pointer it has not proved.
+ *
+ * VERIFY THE DISASSEMBLY after touching these. A "word store fast path" in
+ * this file once emitted eight byte stores because the compiler could not
+ * prove alignment, gained 2 %, and looked correct in the source the whole
+ * time. */
+static inline void
+copy_from_psram(uint8_t *dst, const uint8_t *src, size_t n)
+{
+    while (n != 0u && ((uintptr_t)src & 3u) != 0u) {
+        *dst++ = *src++;
+        n--;
+    }
+    const uint32_t *s32 = (const uint32_t *)(const void *)src;
+    while (n >= 4u) {
+        const uint32_t w = *s32++;
+
+        __builtin_memcpy(dst, &w, 4);
+        dst += 4;
+        n -= 4u;
+    }
+    src = (const uint8_t *)(const void *)s32;
+    while (n-- != 0u)
+        *dst++ = *src++;
+}
+
+static inline void
+copy_to_psram(uint8_t *dst, const uint8_t *src, size_t n)
+{
+    while (n != 0u && ((uintptr_t)dst & 3u) != 0u) {
+        *dst++ = *src++;
+        n--;
+    }
+    uint32_t *d32 = (uint32_t *)(void *)dst;
+    while (n >= 4u) {
+        uint32_t w;
+
+        __builtin_memcpy(&w, src, 4);
+        *d32++ = w;
+        src += 4;
+        n -= 4u;
+    }
+    dst = (uint8_t *)(void *)d32;
+    while (n-- != 0u)
+        *dst++ = *src++;
+}
+
 static void shadow_fill_span(int x0, int x1, int y, uint8_t colour)
 {
     uint8_t *row;
@@ -1206,7 +1274,7 @@ void vidterm_buf_get(uint8_t group, uint8_t id, int x, int y, int w, int h)
             memset(&dst[lo - px0], shadow_uniform_colour,
                    (size_t)(hi - lo));
         else
-            memcpy(&dst[lo - px0], &srow[lo], (size_t)(hi - lo));
+            copy_from_psram(&dst[lo - px0], &srow[lo], (size_t)(hi - lo));
     }
 }
 
@@ -1268,11 +1336,11 @@ void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y)
 
         if (py < clip_y0 || py >= clip_y1)
             continue;
-        memcpy(&video_framebuffer[py][lo],
-               &p[(size_t)row * (size_t)w + (size_t)(lo - px0)], n);
+        copy_from_psram(&video_framebuffer[py][lo],
+                        &p[(size_t)row * (size_t)w + (size_t)(lo - px0)], n);
         srow = shadow_row(py);
         if (srow != NULL)
-            memcpy(&srow[lo], &video_framebuffer[py][lo], n);
+            copy_to_psram(&srow[lo], &video_framebuffer[py][lo], n);
     }
 }
 
