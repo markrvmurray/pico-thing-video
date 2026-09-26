@@ -23,6 +23,7 @@
 #include "chip_stepping.h"
 #include "command_parser.h"
 #include "console.h"
+#include "psram_bench.h"
 #include "hid_cook.h"
 #include "i2c_service.h"
 #include "pico_thing_video.h"
@@ -161,6 +162,13 @@ process_command(char *buf)
 		break;
 	}
 
+	case CMD_PSRAM:
+		/* Destructive, and the renderer must not be drawing into the
+		 * shadow while it is timed -- so this is a deliberate,
+		 * operator-initiated act rather than anything automatic. */
+		psram_bench();
+		break;
+
 	case CMD_FLOOD:
 		/* A measurement hook, not a feature. Expensive Data reads need
 		 * the input FIFO non-empty, and loopback is the only guest-
@@ -231,6 +239,7 @@ status_done:
 		"  verbose            (vb)  echo HID keys and clicks to this console\n"
 		"  flood              (fl)  feed the input FIFO continuously (measurement)\n"
 		"  priority           (pr)  toggle scan-out DMA priority over the cores\n"
+		"  psram              (ps)  time and verify PSRAM (overwrites the graphics shadow)\n"
 		"  help               (h)   this text\n"
 		"\nThe peripheral follows the main 5V rail: bus and video serve only\n"
 		"while it is up; on power loss the firmware restarts into standby\n"

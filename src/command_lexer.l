@@ -80,6 +80,7 @@ match_command_keyword(const char *text)
 		{ "verbose", "vb", TOK_VERBOSE },
 		{ "flood",   "fl", TOK_FLOOD   },
 		{ "priority","pr", TOK_PRIORITY},
+		{ "psram",   "ps", TOK_PSRAM   },
 		{ "status",  "st", TOK_STATUS  },
 		{ "examine", "ex", TOK_EXAMINE },
 		{ "modify",  "mo", TOK_MODIFY  },
