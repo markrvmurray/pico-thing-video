@@ -22,8 +22,10 @@
 # and concluding the logic was wrong when the build was. It also cost the
 # NitrOS-9 side a false bug report.
 #
-# The whole thing takes about fifteen seconds (13.6 s for five firmware
-# trees, 1 s for usim, measured 2026-09-26 on this machine). That buys
+# The whole thing takes about thirty seconds (32.7 s for the six firmware
+# trees in FW_TREES below, the parser tests and the usim suite, measured
+# 2026-09-26 on this machine; it was fifteen with five trees, before
+# build-rwdi-atfe and the larger usim suite). That buys
 # out the entire class of fault, so there is no incremental path here on
 # purpose: a script with a --fast option would get used on the day it
 # mattered most.
