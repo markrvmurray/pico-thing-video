@@ -532,8 +532,13 @@ vid_link_render(void)
 	if (tx_tail != tx_head)
 		std::atomic_thread_fence(std::memory_order_acquire);
 	unsigned budget = VID_LINK_DRAIN_MAX;
-	/* The trace's storage, asked once per call rather than per byte. */
-	uint8_t *const trace = cmd_trace_base();
+	/* The trace's storage, asked once per call rather than per byte -- and
+	 * only when there IS a byte. This call runs millions of times a second
+	 * on an idle link, and asking unconditionally (a call into another file
+	 * that calls win_store_slots()) raised the cost of an idle pass from
+	 * ~0.22 to ~0.29 us, which is what the "busy" figure in status reports
+	 * on a quiet board. */
+	uint8_t *const trace = (tx_tail != tx_head) ? cmd_trace_base() : NULL;
 
 	while (tx_tail != tx_head && budget > 0u) {
 		budget = budget - 1u;
