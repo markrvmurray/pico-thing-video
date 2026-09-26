@@ -1,116 +1,122 @@
 # pico-thing-video
 
-Firmware for a Raspberry Pi Pico2 (RP2350 / PGA2350) acting as a **slave bus
-peripheral** on an external Motorola MC6809E microprocessor's bus. The 6809 is
-the bus master and drives the clocks; the Pico2 watches the address/data bus via
-PIO state machines and responds when selected, presenting an 8-byte register
-window that the 6809 can read and write.
+Firmware for an RP2350 (Pimoroni PGA2350) acting as a **slave bus peripheral**
+on an MC6809E / HD6309 bus. The 6809 is the bus master and supplies the clocks;
+PIO state machines and DMA watch the bus and answer in an 8-byte register
+window at `$FF10`–`$FF17`.
 
-A layered HSTX→DVI video engine is now integrated (see [Video](#video)); a
-USB-host keyboard/mouse is still planned.
+Behind that window sit two devices the guest drives:
+
+- **A DVI console and graphics engine** — 1024×480 RGB332 over HSTX, an 8×16
+  text layer with CoCo3/OS-9 control codes and windows, and the CoCo3-style
+  `$1B` graphics set (lines, fills, curves, flood fill, get/put buffers,
+  patterns, mix modes).
+- **USB host input** — a keyboard and mouse behind a hub, delivered as keyboard
+  bytes and a polled mouse snapshot.
+
+All of it is proven against a real 6809 running NitrOS-9, whose shell runs on
+the DVI display from the USB keyboard.
 
 ## Hardware role
 
-- **E and Q clocks are supplied by the host** and sampled as inputs — the Pico
-  does not generate them.
-- **`!CS` is the attention trigger.** When the host asserts chip-select, the
-  Pico services the cycle; there is no VMA/run-state gating.
-- **`!RESET` is observed** (input, pulled up): the host drives it, the Pico
-  notices and clears its register window.
-- **`!IRQ` is a simulated open-collector output** back to the host: driving the
-  pin as an output asserts (low), switching it to an input releases it (hi-Z).
+- **E and Q are supplied by the host** and sampled as inputs.
+- **`!CS` is the attention trigger**: external glue decodes `$FF10`–`$FF17`,
+  and the Pico sees only `!CS` and A2–A0, so the base address lives in the
+  decoder.
+- **`!RESET` is observed** (input, pulled up); the Pico clears its window.
+- **`!IRQ` is a simulated open-collector output** (MC6850-shaped: asserted
+  while receive interrupts are enabled and input is waiting).
+- The firmware **follows the host's 5V rail**: it stands by until the rail is
+  up, and reboots back into standby when it goes.
 
 ## Register window
 
-The Pico exposes an **8-byte register window at guest `$FF10`–`$FF17`** (see
-`include/registers.h`). External address-decode glue asserts `!CS` over that
-range; the Pico sees only `!CS` and A2–A0, so the base address lives in the
-decoder, not the firmware. Reads and writes to the same offset can map to
-separate host-side buffers (`read_registers[]` / `write_registers[]`), allowing
-read-only enforcement. Device sub-registers (video, keyboard, mouse) will be
-laid out in this window as they are added.
+MC6850-shaped; the guest reads it one byte at a time.
 
-## Video
+| Address | Read | Write |
+|---|---|---|
+| `$FF10` | next input byte (keyboard) | next command byte (console / graphics) |
+| `$FF11` | status: RDRF, TDRE, READY, protocol version, MOUSE, IRQ | control: soft reset, loopback, receive-interrupt enable |
+| `$FF12` | next byte of the 7-byte mouse snapshot | take a sample and restart the snapshot |
+| `$FF13` | next byte of the 6-byte surface description | restart it |
+| `$FF14`–`$FF17` | scratch | scratch |
 
-A layered HSTX→DVI text+graphics engine (spliced from `../pico-vidterm`) runs on
-Core 1:
-
-- **Output:** DVI on **GP12–19** (four differential pairs, Pico DVI Sock wiring)
-  — 1024×480, RGB332, ~60 Hz. Needs an RP2350 with an HDMI/DVI breakout.
-- **Framebuffer** in SRAM, scanned out by a ping-pong DMA pair on a per-scanline
-  IRQ (its own `DMA_IRQ_2`, at higher priority than the bus). An 8×16 Spleen-font
-  text layer is composited on top.
-- A built-in **test screen** (compiled in via `VIDEO_DEMO`, default on) draws a
-  border, ruler, the full character set, and diagonals at startup.
-
-The `$FF10` register interface for the 6809 to drive the video isn't wired up
-yet — the engine and its test pattern are the current state. See `src/video.cpp`.
+The payload contract is `docs/copico-video-protocol.md` in the NitrOS-9 tree.
+The status register's version field doubles as a liveness check: an absent or
+resetting peripheral reads as the wrong version, and a guest must not trust any
+other bit until it matches.
 
 ## Pin map
 
-The timing-critical bus pins are owned by the PIO programs. The bus block spans
-GPIO 23–39 (above the default 0–31 window), so each bus PIO sets its GPIO base to
-16 before initialising pins. `!CS` sits above the data bus so the write state
-machine can read `R/!W`, the address, and the data as one contiguous field.
-
-| GPIO  | Signal      | Dir | Notes                          |
-|-------|-------------|-----|--------------------------------|
-| 0–1   | UART TX/RX  | —   | console (UART0)                |
-| 12–19 | HSTX DVI    | out | 4 differential pairs (DVI Sock)|
-| 20    | `!RESET`    | in  | host reset, observed           |
-| 21    | `!IRQ`      | out | simulated open-collector       |
-| 23–24 | Bus trace   | out | PIO side-set, debug            |
-| 25    | E clock     | in  | supplied by host               |
-| 26    | Q clock     | in  | supplied by host               |
-| 27    | `R/!W`      | in  |                                |
-| 28–30 | A2–A0       | in  | address bus                    |
-| 31–38 | D7–D0       | io  | data bus                       |
-| 39    | `!CS`       | in  | attention trigger              |
+| GPIO | Signal | Dir | Notes |
+|---|---|---|---|
+| 0–1 | UART0 TX/RX | — | console, 115200 |
+| 7 | `!FLT` | in | TPS2051B VBUS switch fault |
+| 8 | USB role | out | CC mux + VBUS enable; high = host |
+| 9 | HDMI HPD | in | hot-plug detect |
+| 10–11 | HDMI DDC | io | I2C1, 100 kHz |
+| 12–19 | HSTX DVI | out | 4 differential pairs |
+| 20 | `!RESET` | in | observed |
+| 21 | `!IRQ` | out | simulated open collector |
+| 23–24 | bus trace | out | PIO side-set, debug |
+| 25 / 26 | E / Q | in | supplied by host |
+| 27 | `R/!W` | in | |
+| 28–30 | A2–A0 | in | |
+| 31–38 | D7–D0 | io | |
+| 39 | `!CS` | in | attention trigger |
+| 46 | ADC6 | in | host 5V rail via ÷2 |
+| 47 | PSRAM CS | out | 8 MB PSRAM (XIP CS1) |
 
 ## Build
 
-Requires the Pico SDK. `PICO_SDK_PATH` may be supplied either as an environment
-variable or as a CMake cache variable (`-DPICO_SDK_PATH=...`); both work.
+Requires the Pico SDK (as an environment variable or a CMake cache variable)
+and Homebrew's bison 3.x on macOS (the system bison 2.3 is too old).
 
 ```bash
 export PICO_SDK_PATH=<path-to-pico-sdk>
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+cmake -S . -B build-host -DCMAKE_BUILD_TYPE=Release
+cmake --build build-host -j
 ```
 
-Outputs: `build/pico-thing-video.uf2` (flash via USB mass storage) and
-`build/pico-thing-video.elf` (for the debugger).
+| CMake option | Default | Meaning |
+|---|---|---|
+| `USB_HOST_MODE` | ON | USB HID host; OFF builds a USB-CDC device instead |
+| `FAST_SYS_CLK_320` | ON | 320 MHz system clock; OFF for 192 MHz |
+| `SELFTEST` | ON | include the on-hardware self-tests (`se`) |
+| `VIDEO_SCANOUT` | ON | OFF leaves the display dark (a measurement build) |
 
-The build also runs flex/bison on the host to generate the console command
-parser, and auto-generates a PIO header from `src/pico_thing_video.pio`.
-`compile_commands.json` is emitted on every configure for clangd / CLion.
+Both gcc and ATfE/clang are supported and produce different binaries; build
+with both. `scripts/rebuild-all.sh` clean-builds every configuration and runs
+the host tests (`tests/`) and the simulator suite.
 
-macOS ships bison 2.3, which is too old — install Homebrew's bison 3.x with
-`brew install bison`; the build picks it up automatically.
-
-### CLion
-
-Open the project in CLion and add `-DPICO_SDK_PATH=<path-to-sdk>` to the CMake
-profile's CMake options (Settings → Build, Execution, Deployment → CMake). The
-CMake script accepts the path as a cache variable, so no environment variable is
-needed.
+The portable half of the firmware — the renderer, the guest protocol, the
+console and the HID cooking — is compiled into the USim simulator
+(`usim09pt --video`), whose test suite exercises it through the real register
+protocol.
 
 ## Debugging
 
-OpenOCD with `openocd_pico.cfg` (or `pico.cfg`). Serial console is on the
-UART (GPIO 0/1, 115200 baud) and USB CDC. `rp2350.svd` is included for
-register inspection in the debugger.
+OpenOCD with `pico.cfg` (CMSIS-DAP over SWD); with two probes attached,
+`probe_video.cfg` selects this board's by serial number. The console is on
+UART0 in every build. `rp2350.svd` is included for register inspection.
 
 ## Interactive console
 
-The firmware provides an interactive command interpreter over the console.
-Each command has a full name and a two-letter alias:
+Every command has a two-letter alias.
 
 | Command | Alias | Action |
-|---------|-------|--------|
-| `verbose` | `vb` | Toggle verbose logging |
-| `status` | `st` | Show verbose / `!RESET` / `!IRQ` state, Core 1 counters, and the register window |
-| `examine` | `ex` | Dump the 8-byte register window |
-| `modify <off> <byte>...` | `mo` | Write bytes into the window at `<off>` (0..7) |
-| `fill [value]` | `fi` | Fill the whole window with `value` (default 00) |
-| `usb <args>` | `ub` | USB subcommands |
+|---|---|---|
+| `help` | `h` | grouped help |
+| `status [period]` | `st` | build, rail, temperature, bus and render timing, link and input counters, the register window; repeats every `period` ms |
+| `trace [n]` | `tr` | the last `n` command bytes the renderer consumed, marked by role |
+| `selftest` | `se` | on-hardware tests, with a canary that must fail (destructive) |
+| `psram` | `ps` | time and verify PSRAM (destructive) |
+| `priority` | `pr` | toggle scan-out DMA bus priority |
+| `flood` | `fl` | feed the input FIFO continuously (measurement) |
+| `verbose` | `vb` | echo cooked keyboard and mouse input (host builds) |
+| `power` | `pw` | host rail and serving state |
+| `i2c` | `ic` | HDMI hot-plug level and a DDC bus scan |
+| `examine` | `ex` | dump the register window |
+| `modify <off> <byte>...` | `mo` | write bytes into the window |
+| `fill [value]` | `fi` | fill the window |
+| `usb <args>` | `ub` | send to the USB-CDC guest console (device builds) |
