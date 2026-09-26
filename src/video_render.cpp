@@ -466,15 +466,39 @@ copy_to_psram(uint8_t *dst, const uint8_t *src, size_t n)
         *dst++ = *src++;
 }
 
+/* A shadow row about to be written from x0 to x1. When the span is the whole
+ * row there is nothing to preserve, so an undrawn row is marked real WITHOUT
+ * first being filled with its uniform colour -- a 1 KB PSRAM write that would
+ * be overwritten at once, and on a full-panel patterned fill that was 480 KB
+ * of wasted traffic. */
+static inline uint8_t *shadow_row_for_write(int y, int x0, int x1)
+{
+    uint8_t *base = gfx_shadow_base();
+
+    if (base == NULL)
+        return NULL;
+    if (!shadow_row_real[y] && x0 == 0 && x1 == FB_WIDTH) {
+        shadow_row_real[y] = true;
+        shadow_any_real = true;
+        return &base[(size_t)y * FB_WIDTH];
+    }
+    return shadow_row(y);
+}
+
 static void shadow_fill_span(int x0, int x1, int y, uint8_t colour)
 {
     uint8_t *row;
 
     if (x1 <= x0)
         return;
-    /* A span covering the whole width makes the row uniform again in its own
-     * right, but tracking that per row buys little -- fill it. */
-    row = shadow_row(y);
+    /* A full-width span overwrites the whole row, so an undrawn row is not
+     * first filled with its uniform colour only to be overwritten -- the
+     * span writer already skipped that, and this path did not: a plain
+     * full-panel FFill over undrawn rows wrote every row twice, ~20 ms of
+     * its measured 45. (Making the row UNIFORM again, rather than real,
+     * would save the second write too, but needs a per-row colour -- one
+     * byte a row, and SRAM is tight; see VID-029.) */
+    row = shadow_row_for_write(y, x0, x1);
     if (row != NULL)
         memset(&row[x0], colour, (size_t)(x1 - x0));
 }
@@ -998,25 +1022,6 @@ static inline void put_pixel_abs(int px, int py, uint8_t src)
     }
     video_framebuffer[py][px] = v;
     shadow_poke(px, py, v);
-}
-
-/* A shadow row about to be written from x0 to x1. When the span is the whole
- * row there is nothing to preserve, so an undrawn row is marked real WITHOUT
- * first being filled with its uniform colour -- a 1 KB PSRAM write that would
- * be overwritten at once, and on a full-panel patterned fill that was 480 KB
- * of wasted traffic. */
-static inline uint8_t *shadow_row_for_write(int y, int x0, int x1)
-{
-    uint8_t *base = gfx_shadow_base();
-
-    if (base == NULL)
-        return NULL;
-    if (!shadow_row_real[y] && x0 == 0 && x1 == FB_WIDTH) {
-        shadow_row_real[y] = true;
-        shadow_any_real = true;
-        return &base[(size_t)y * FB_WIDTH];
-    }
-    return shadow_row(y);
 }
 
 /* ONE SPAN of patterned and/or mixed pixels, x0..x1 absolute and already
