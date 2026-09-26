@@ -200,11 +200,26 @@ core0_load_print(void)
 	       (unsigned long)blit_total, (unsigned long)blit_worst,
 	       (unsigned)(TEXT_COLS * TEXT_ROWS));
 	printf("Core0 figures: %s\n", core0_settled ?
-	       "steady state (bring-up discarded after 60 frames)" :
+	       "steady state (bring-up and console time excluded)" :
 	       "INCLUDING BRING-UP — not yet settled");
-	printf("Service:     worst gap %lu us (frame %lu us)%s\n",
+	// LATE needs a tolerance, because a service that runs every frame lands
+	// ONE PERIOD after the last by construction, give or take how long the
+	// loop took to notice the frame had turned over. A bare "gap > period"
+	// therefore flagged healthy jitter: observed 16,626 us against a
+	// 16,618 us frame -- 8 us, 0.05 % -- printed LATE on an idle board.
+	//
+	// 5 % sits far above that jitter and below the case this line exists to
+	// catch: a render call of 1.08 frames (18 ms against 16.7), which the
+	// frames-missed count cannot see because it only counts whole frames.
+	// The overrun is printed as a percentage so a reader sees how close to
+	// the line it is rather than a bare yes or no.
+	const uint32_t tol = period / 20u;
+	const bool late = period != 0u && service_max_us > period + tol;
+	printf("Service:     worst gap %lu us (frame %lu us, %+ld %%)%s\n",
 	       (unsigned long)service_max_us, (unsigned long)period,
-	       (period && service_max_us > period) ? "  LATE" : "");
+	       period ? (long)(((int64_t)service_max_us - (int64_t)period) *
+	                       100 / (int64_t)period) : 0L,
+	       late ? "  LATE" : "");
 }
 
 
