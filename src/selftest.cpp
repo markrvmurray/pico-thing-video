@@ -342,6 +342,38 @@ test_blit_timing(void)
 	(void)vidterm_clear('M', 0x01u);
 	timed_refresh("text refresh, transp, resident", 40000u);
 
+	/* ONE BOUNDED PASS of that worst case -- what the render core actually
+	 * pays per call now. The bound (VIDTERM_REFRESH_ROWS_MAX rows) was
+	 * derived from the full figure above, ~0.96 ms a row, to land under
+	 * 5 ms; this confirms the derivation on the hardware rather than
+	 * trusting the division. Proven to have drawn exactly that many rows'
+	 * worth of cells, since a pass that drew nothing would time superbly. */
+	{
+		uint32_t before, after, worst;
+
+		(void)vidterm_clear('M', 0x01u);
+		vidterm_blit_stats(&before, &worst);
+		const uint32_t b0 = time_us_32();
+		const bool more = vidterm_refresh_bounded();
+		const uint32_t us = time_us_32() - b0;
+		vidterm_blit_stats(&after, &worst);
+
+		const uint32_t want = (uint32_t)VIDTERM_REFRESH_ROWS_MAX *
+		    (uint32_t)TEXT_COLS;
+		if (after - before != want || !more) {
+			char d[80];
+
+			snprintf(d, sizeof(d), "drew %lu cells (want %lu), more"
+			    "=%d - not one bounded slice",
+			    (unsigned long)(after - before),
+			    (unsigned long)want, (int)more);
+			result("one bounded pass, resident", false, d);
+		} else {
+			timed("one bounded pass, resident", us, 8000u);
+		}
+		vidterm_refresh();	/* finish it, so nothing stays dirty */
+	}
+
 	/* Forty 32x32 stamps -- the wgfx gem scene. Before the row rewrite
 	 * this was about 300 us a stamp, 12 ms for the forty, because every
 	 * pixel was two QSPI transactions; measured 4240 us afterwards.

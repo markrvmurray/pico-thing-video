@@ -59,6 +59,13 @@ void vidterm_puts(int col, int row, const char *s, uint8_t attr);
  * thrown away. */
 bool vidterm_clear(uint8_t ch, uint8_t attr);
 void vidterm_refresh(void);   /* blit dirty text cells into the framebuffer */
+/* The same, but at most VIDTERM_REFRESH_ROWS_MAX text rows per call; TRUE if
+ * rows remain and the caller must come back. Derived, not picked: the worst
+ * case measured is 28.7 ms for 30 rows (transparent text over a fully drawn
+ * plane), ~0.96 ms a row, so five rows is under 5 ms -- the same third-of-a-
+ * frame budget VID_LINK_DRAIN_MAX was sized to. */
+#define VIDTERM_REFRESH_ROWS_MAX 5
+bool vidterm_refresh_bounded(void);
 void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr);
 
 /* Region variants, for text windows: the same operations bounded to a

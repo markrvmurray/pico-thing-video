@@ -511,6 +511,16 @@ vid_link_render(void)
 		vid_link_consume_reset();
 	}
 
+	/* An earlier burst's drawing still owed. Finish that, and ONLY that:
+	 * draining new bytes first could let a later burst's graphics land
+	 * before the earlier burst's text was drawn, and opaque text would then
+	 * paint over them. The guest is flow-controlled by TDRE meanwhile. */
+	if (!loopback && vid_link_consume_busy()) {
+		vid_link_consume_begin();
+		vid_link_consume_flush();
+		return;
+	}
+
 	/* Drain the command FIFO. Loopback (M0 test mode) diverts bytes to
 	 * the input FIFO; otherwise they feed the console layer. */
 	bool consumed = false;
@@ -542,6 +552,12 @@ vid_link_render(void)
 		stat_tx_capped = stat_tx_capped + 1u;
 	if (consumed)
 		vid_link_consume_flush();
+}
+
+extern "C" bool
+vid_link_idle(void)
+{
+	return tx_tail == tx_head && !vid_link_consume_busy();
 }
 
 extern "C" void

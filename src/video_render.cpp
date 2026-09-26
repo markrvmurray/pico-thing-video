@@ -631,9 +631,14 @@ void vidterm_blit_reset(void)
     blit_cells_max = 0;
 }
 
-static void render_dirty_cells(void)
+/* Blit dirty cells, at most max_rows text rows of them, and say whether any
+ * remain. Rows are taken top to bottom from wherever the dirty bits are, so a
+ * bounded caller simply comes back and the next call carries on. */
+static bool render_dirty_rows(int max_rows)
 {
     uint32_t blitted = 0;
+    int rows_done = 0;
+    bool left = false;
     /* Once per refresh: the storage cannot change underneath a refresh, and
      * asking per cell was a cross-file call chain paid 3840 times. */
     const uint8_t *sbase = gfx_shadow_base();
@@ -644,6 +649,11 @@ static void render_dirty_cells(void)
             for (int w = 0; w < DIRTY_WORDS; w++) any |= dirty_rows[row][w];
             if (!any) continue;
         }
+        if (rows_done == max_rows) {
+            left = true;
+            break;
+        }
+        rows_done++;
 
         for (int col = 0; col < TEXT_COLS; col++) {
             int word = col >> 5;
@@ -658,6 +668,7 @@ static void render_dirty_cells(void)
     blit_cells_total += blitted;
     if (blitted > blit_cells_max)
         blit_cells_max = blitted;
+    return left;
 }
 
 /* ───────────────────────── public API (text layer) ──────────────────────── */
@@ -770,7 +781,20 @@ bool vidterm_clear(uint8_t ch, uint8_t attr)
 
 void vidterm_refresh(void)
 {
-    render_dirty_cells();
+    (void)render_dirty_rows(TEXT_ROWS);
+}
+
+/* A refresh the guest's stream can ask for without costing the render core its
+ * frame. A full-screen transparent refresh over drawn graphics measured 28.7 ms
+ * -- 1.7 frames -- and cannot fit one at any speed: reading a fully drawn plane
+ * is ~11 ms even sequentially, plus the composing. So the work is spread: at
+ * most VIDTERM_REFRESH_ROWS_MAX text rows per call, the caller returning until
+ * it is done. The screen then finishes over two frames instead of one frame
+ * arriving late (agreed with Mark 2026-09-26). vidterm_refresh() stays
+ * complete, for callers that have to finish before anything else draws. */
+bool vidterm_refresh_bounded(void)
+{
+    return render_dirty_rows(VIDTERM_REFRESH_ROWS_MAX);
 }
 
 /* Scroll a rectangle up one text row. Unlike the full-screen case this cannot

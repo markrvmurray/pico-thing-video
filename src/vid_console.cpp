@@ -904,13 +904,20 @@ vid_link_consume(uint8_t b)
 	}
 }
 
+extern "C" bool
+vid_link_consume_busy(void)
+{
+	return dirty;
+}
+
 extern "C" void
 vid_link_consume_flush(void)
 {
-	if (dirty) {
-		dirty = false;
-		vidterm_refresh();
-	}
+	/* Bounded: a full screen of text can cost more than a frame, so the
+	 * refresh does a slice and `dirty` stays set until it is all drawn.
+	 * The link keeps calling back (consume_busy) until then. */
+	if (dirty)
+		dirty = vidterm_refresh_bounded();
 	/* Park the cursor wherever the burst left it. Doing this per burst
 	 * rather than per byte keeps a fast-moving cursor from flickering
 	 * through every intermediate cell of a line of output. */

@@ -261,6 +261,12 @@ void vid_link_input(uint8_t byte);
 /* Console diagnostics (Core 0; reads counters only). */
 void vid_link_print_status(void);
 
+/* TRUE when the render side has caught up: no command bytes waiting and no
+ * drawing owed from an earlier burst. Render core only. Both the drain and the
+ * text refresh are bounded per call, so "one call" no longer means "done" --
+ * this is how anything that needs "done" asks for it. */
+bool vid_link_idle(void);
+
 /* The consumer contract: the glass-TTY / command-interpreter layer
  * (vid_console.cpp — portable, shared with the simulator) implements
  * these. consume_begin() precedes each burst (the console uses it to lift
@@ -268,11 +274,20 @@ void vid_link_print_status(void);
  * command byte in order when loopback is off;
  * consume_flush() follows each drained burst (batch a refresh there);
  * consume_reset() accompanies every link reset (power-on, Ctl RESET,
- * host !RESET). */
+ * host !RESET).
+ *
+ * consume_busy() is TRUE while an earlier burst's drawing is unfinished --
+ * the text refresh is bounded per call, so a full screen takes several. While
+ * it is, the render pass calls begin() and flush() WITHOUT draining any new
+ * bytes: stream order is kept exactly as it was when a burst's text was drawn
+ * in one go, since nothing from a later burst can run before an earlier
+ * burst's drawing is complete. The guest meanwhile waits on TDRE, the same
+ * trade the bounded drain already makes. */
 void vid_link_consume_begin(void);
 void vid_link_consume(uint8_t byte);
 void vid_link_consume_flush(void);
 void vid_link_consume_reset(void);
+bool vid_link_consume_busy(void);
 
 #ifdef __cplusplus
 }
