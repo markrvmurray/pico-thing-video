@@ -29,6 +29,7 @@
 
 #include "pico/stdlib.h"
 #include "hardware/timer.h"
+#include "hardware/dma.h"
 
 #include "gfx_shadow.h"
 
@@ -40,14 +41,17 @@
 static void
 report(const char *what, uint32_t us, uint32_t bytes, unsigned accesses)
 {
-	/* ns per byte is the figure that decides a design, and ns per ACCESS
-	 * is the one that explains it: if the two diverge as the width grows,
-	 * the cost is per-transaction overhead and the fix is wider or fewer
-	 * accesses. If they track, it is genuinely bandwidth and no amount of
-	 * restructuring will help. */
+	/* ns per byte decides a design; ns per OP explains it. For the raw
+	 * loops an op IS one bus access, so comparing 8-bit against 32-bit
+	 * separates fixed overhead from payload cost -- that comparison is what
+	 * showed the cost to be 29 ns fixed plus 16 a byte, and killed the
+	 * belief that the preamble dominated. For memcpy and DMA an op is one
+	 * CALL or one TRANSFER covering many accesses, so the column is setup
+	 * cost per row. It said "ns/access" once, which invited reading a
+	 * 256-byte memcpy as costing 13 us per access. */
 	const uint64_t ns = (uint64_t)us * 1000u;
 
-	printf("  %-26s %6lu us   %5llu ns/byte  %6llu ns/access\n", what,
+	printf("  %-26s %6lu us   %5llu ns/byte  %6llu ns/op\n", what,
 	    (unsigned long)us,
 	    (unsigned long long)(bytes ? ns / bytes : 0),
 	    (unsigned long long)(accesses ? ns / accesses : 0));
@@ -142,6 +146,61 @@ psram_bench(void)
 			memcpy((void *)&p8[r * n], sram, n);
 		snprintf(label, sizeof(label), "memcpy SRAM->PSRAM, %u B", n);
 		report(label, time_us_32() - t0, iters * n, iters);
+	}
+
+	/* DMA, at the same sizes. The question is not whether DMA is faster per
+	 * byte -- the QSPI is serial and 32-bit accesses already reach 23 ns a
+	 * byte against a 16 ns floor, so there is little left -- but whether it
+	 * is COMPETITIVE per byte while leaving the core free. That matters
+	 * because what hurts about the block blit is the LATENCY of a render
+	 * call, not core utilisation: Core 0 measured 12.8 % busy with a 77 ms
+	 * worst call. If DMA moves a row at a similar cost per byte then rows
+	 * can be fetched one ahead while the core composites the previous one,
+	 * and most of the transfer hides behind work that has to happen anyway.
+	 * If DMA is markedly worse, the idea dies here for a few microseconds
+	 * of measurement instead of a day of implementation.
+	 *
+	 * Per-transfer setup is INCLUDED deliberately: a real user pays it once
+	 * a row, so excluding it would flatter the figure into uselessness. */
+	const int ch = dma_claim_unused_channel(false);
+
+	if (ch < 0) {
+		printf("  (no free DMA channel: the bus engine owns two and"
+		       " video one; DMA not timed)\n");
+	} else {
+		dma_channel_config c =
+		    dma_channel_get_default_config((uint)ch);
+
+		channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
+		channel_config_set_read_increment(&c, true);
+		channel_config_set_write_increment(&c, true);
+		for (unsigned si = 0; si < sizeof(sizes) / sizeof(sizes[0]);
+		    si++) {
+			const unsigned n = sizes[si];
+			const unsigned iters = BENCH_BYTES / n;
+			char label[40];
+
+			t0 = time_us_32();
+			for (unsigned r = 0; r < iters; r++) {
+				dma_channel_configure((uint)ch, &c, sram,
+				    (const void *)&p8[r * n], n / 4u, true);
+				dma_channel_wait_for_finish_blocking((uint)ch);
+			}
+			snprintf(label, sizeof(label), "DMA PSRAM->SRAM, %u B",
+			    n);
+			report(label, time_us_32() - t0, iters * n, iters);
+
+			t0 = time_us_32();
+			for (unsigned r = 0; r < iters; r++) {
+				dma_channel_configure((uint)ch, &c,
+				    (void *)&p8[r * n], sram, n / 4u, true);
+				dma_channel_wait_for_finish_blocking((uint)ch);
+			}
+			snprintf(label, sizeof(label), "DMA SRAM->PSRAM, %u B",
+			    n);
+			report(label, time_us_32() - t0, iters * n, iters);
+		}
+		dma_channel_unclaim((uint)ch);
 	}
 
 	/* Defeat the dead-store elimination that would otherwise delete the
