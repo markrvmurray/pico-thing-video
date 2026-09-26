@@ -173,6 +173,7 @@ add_executable(pico-thing-video
 		src/win_store.cpp
 		src/vid_link.cpp
 		src/video.cpp
+		src/cmd_trace.cpp
 		src/mem_ops.c
 		src/psram_bench.cpp
 		src/selftest.cpp

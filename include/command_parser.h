@@ -23,6 +23,7 @@ typedef enum cmd_tag {
 	CMD_PRIORITY,
 	CMD_PSRAM,
 	CMD_SELFTEST,
+	CMD_TRACE,
 	CMD_STATUS,
 	CMD_POWER,
 	CMD_I2C_SCAN,
@@ -41,6 +42,7 @@ typedef struct parsed_cmd {
 		struct {
 			uint32_t period; /* repeat period in ms; 0 = once */
 		} status;
+		struct { uint32_t count; } trace;
 
 		/* CMD_MODIFY */
 		struct {

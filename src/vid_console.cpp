@@ -904,6 +904,28 @@ vid_link_consume(uint8_t b)
 	}
 }
 
+extern "C" uint8_t
+vid_link_consume_class(void)
+{
+	/* Mapped explicitly, not by enum order: the parameter states are
+	 * several, and a new one added later must not silently become a
+	 * different class. */
+	switch (state) {
+	case ST_NORMAL:
+		return VID_BYTE_START;
+	case ST_ESC_OP:
+		return VID_BYTE_SUBCODE;
+	case ST_ESC_SKIP:
+		return VID_BYTE_PAYLOAD;
+	case ST_XY_COL:
+	case ST_XY_ROW:
+	case ST_CURSOR_ARG:
+	case ST_ESC_PARAM:
+		return VID_BYTE_PARAM;
+	}
+	return VID_BYTE_PARAM;
+}
+
 extern "C" bool
 vid_link_consume_busy(void)
 {

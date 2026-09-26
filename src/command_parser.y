@@ -101,6 +101,7 @@ static int      _byte_count;
 %token TOK_PRIORITY
 %token TOK_PSRAM
 %token TOK_SELFTEST
+%token TOK_TRACE
 %token TOK_STATUS
 %token TOK_EXAMINE
 %token TOK_MODIFY
@@ -130,6 +131,7 @@ command:
 	| priority_cmd
 	| psram_cmd
 	| selftest_cmd
+	| trace_cmd
 	| status_cmd
 	| examine_cmd
 	| modify_cmd
@@ -171,6 +173,23 @@ psram_cmd:
 
 selftest_cmd:
 	TOK_SELFTEST { result->tag = CMD_SELFTEST; }
+	;
+
+/* trace [ <count> ]   (decimal; the most recent bytes, default 256) */
+trace_cmd:
+	  TOK_TRACE {
+		result->tag         = CMD_TRACE;
+		result->trace.count = 256u;
+	}
+	| TOK_TRACE TOK_NUMBER {
+		long v = parse_dec($2);
+		if (v == LONG_MIN || v <= 0) {
+			printf("Invalid count '%s' (decimal bytes)\n", $2);
+			YYERROR;
+		}
+		result->tag         = CMD_TRACE;
+		result->trace.count = (uint32_t)v;
+	}
 	;
 
 /* -----------------------------------------------------------------------

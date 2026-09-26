@@ -207,6 +207,13 @@ process_command(char *buf)
 		break;
 	}
 
+	case CMD_TRACE:
+		/* What the renderer was actually told, byte by byte, with the
+		 * role each byte played -- the one question a wrong picture
+		 * cannot answer on its own. */
+		vid_link_trace_print(cmd.trace.count);
+		break;
+
 	case CMD_SELFTEST:
 #if SELFTEST
 		selftest_run();
@@ -299,6 +306,7 @@ status_done:
 		"  priority           (pr)  toggle scan-out DMA priority over the cores\n"
 		"  psram              (ps)  time and verify PSRAM (overwrites the graphics shadow)\n"
 		"  selftest           (se)  on-hardware tests usim cannot make (DESTRUCTIVE)\n"
+		"  trace [n]          (tr)  the last n command bytes as consumed, marked by role\n"
 		"  help               (h)   this text\n"
 		"\nThe peripheral follows the main 5V rail: bus and video serve only\n"
 		"while it is up; on power loss the firmware restarts into standby\n"

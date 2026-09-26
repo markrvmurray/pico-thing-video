@@ -18,6 +18,7 @@
 #include "gfx_shadow.h"
 #include "gfx_bufs.h"
 #include "win_store.h"
+#include "cmd_trace.h"
 #include "video.h"
 #include "video_render.h"
 
@@ -94,24 +95,57 @@ test_psram_layout(void)
 
 	/* Declared sizes against the part. */
 	const size_t want = GFX_SHADOW_BYTES + GFX_BUFPOOL_BYTES +
+	    CMD_TRACE_BYTES +
 	    (size_t)win_store_slots() * WIN_STORE_SLOT_BYTES;
 
 	snprintf(d, sizeof(d), "need %u KB of %u KB",
 	    (unsigned)(want / 1024u), (unsigned)(detected / 1024u));
 	result("declared regions fit", want <= detected, d);
 
-	/* Overlap. Pointer comparison across separately-declared objects is
-	 * formally dodgy in C, which is why this compares INTEGERS -- and it
-	 * is worth doing at all because the thing being checked is exactly
-	 * the assumption the language will not let us state. */
-	const uintptr_t s0 = (uintptr_t)shadow, s1 = s0 + GFX_SHADOW_BYTES;
-	const uintptr_t b0 = (uintptr_t)bufs, b1 = b0 + GFX_BUFPOOL_BYTES;
-	const bool overlap = (s0 < b1) && (b0 < s1);
+	/* Overlap, EVERY PAIR. Four translation units each carve a region out
+	 * of PSRAM, and a first version of this compared only two of them --
+	 * the parked-window store and the command trace were counted in the
+	 * size check above and never checked for overlap at all. A clash would
+	 * present as a guest buffer, a parked window or the trace changing
+	 * under its owner, a long way from the cause.
+	 *
+	 * Compared as INTEGERS: pointer ordering across separately-declared
+	 * objects is formally dodgy in C, and the thing being checked is
+	 * exactly the assumption the language will not let us state. */
+	const struct {
+		const char *name;
+		uintptr_t base;
+		size_t len;
+	} reg[] = {
+		{ "shadow", (uintptr_t)shadow, GFX_SHADOW_BYTES },
+		{ "bufs", (uintptr_t)bufs, GFX_BUFPOOL_BYTES },
+		{ "trace", (uintptr_t)cmd_trace_base(), CMD_TRACE_BYTES },
+		{ "windows", (uintptr_t)win_store_slot(0),
+		    (size_t)win_store_slots() * WIN_STORE_SLOT_BYTES },
+	};
+	const unsigned nreg = sizeof(reg) / sizeof(reg[0]);
+	bool clash = false;
 
-	snprintf(d, sizeof(d), "shadow %08lx+%uK, bufs %08lx+%uK",
-	    (unsigned long)s0, (unsigned)(GFX_SHADOW_BYTES / 1024u),
-	    (unsigned long)b0, (unsigned)(GFX_BUFPOOL_BYTES / 1024u));
-	result("shadow vs buffer pool", !overlap, d);
+	for (unsigned i = 0; i < nreg && !clash; i++)
+		for (unsigned j = i + 1; j < nreg && !clash; j++) {
+			if (reg[i].base == 0u || reg[j].base == 0u)
+				continue;
+			if (reg[i].base < reg[j].base + reg[j].len &&
+			    reg[j].base < reg[i].base + reg[i].len) {
+				snprintf(d, sizeof(d), "%s %08lx+%uK OVERLAPS %s"
+				    " %08lx+%uK", reg[i].name,
+				    (unsigned long)reg[i].base,
+				    (unsigned)(reg[i].len / 1024u), reg[j].name,
+				    (unsigned long)reg[j].base,
+				    (unsigned)(reg[j].len / 1024u));
+				clash = true;
+			}
+		}
+	if (!clash)
+		snprintf(d, sizeof(d), "%u regions, trace %08lx+%uK",
+		    nreg, (unsigned long)reg[2].base,
+		    (unsigned)(CMD_TRACE_BYTES / 1024u));
+	result("psram regions disjoint", !clash, d);
 }
 
 /* ------------------------------------------------------------------------

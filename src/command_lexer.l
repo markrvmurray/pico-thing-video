@@ -82,6 +82,7 @@ match_command_keyword(const char *text)
 		{ "priority","pr", TOK_PRIORITY},
 		{ "psram",   "ps", TOK_PSRAM   },
 		{ "selftest","se", TOK_SELFTEST},
+		{ "trace",   "tr", TOK_TRACE   },
 		{ "status",  "st", TOK_STATUS  },
 		{ "examine", "ex", TOK_EXAMINE },
 		{ "modify",  "mo", TOK_MODIFY  },

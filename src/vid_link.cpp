@@ -8,6 +8,7 @@
 #include "registers.h"
 #include "video.h"	/* FB_WIDTH/HEIGHT, TEXT_COLS/ROWS */
 #include "vid_link.h"
+#include "cmd_trace.h"
 
 /* Command FIFO (6809 -> us). The register contract promises TDRE set means
  * the next single Data write is accepted; 2 KB is the advertised minimum
@@ -531,10 +532,27 @@ vid_link_render(void)
 	if (tx_tail != tx_head)
 		std::atomic_thread_fence(std::memory_order_acquire);
 	unsigned budget = VID_LINK_DRAIN_MAX;
+	/* The trace's storage, asked once per call rather than per byte. */
+	uint8_t *const trace = cmd_trace_base();
+
 	while (tx_tail != tx_head && budget > 0u) {
 		budget = budget - 1u;
 		const uint8_t b = tx_fifo[tx_tail & TX_FIFO_MASK];
 		tx_tail = tx_tail + 1u;
+
+		/* Record the byte AS CONSUMED, with its role in the framing
+		 * taken BEFORE the consumer sees it -- after, the state has
+		 * already moved on to describe the next byte. Indexed by the
+		 * absolute count, which is what makes an offset in a dump
+		 * line up with "cons" in status and with the guest's map. */
+		if (trace != NULL) {
+			const uint32_t at =
+			    (stat_tx_consumed & (CMD_TRACE_ENTRIES - 1u)) * 2u;
+
+			trace[at] = b;
+			trace[at + 1u] = loopback ? (uint8_t)VID_BYTE_LOOPBACK :
+			    vid_link_consume_class();
+		}
 		stat_tx_consumed = stat_tx_consumed + 1u;
 		stat_last_byte = b;
 		if (loopback) {
@@ -552,6 +570,86 @@ vid_link_render(void)
 		stat_tx_capped = stat_tx_capped + 1u;
 	if (consumed)
 		vid_link_consume_flush();
+}
+
+extern "C" void
+vid_link_trace_span(uint32_t *oldest, uint32_t *next)
+{
+	const uint32_t n = stat_tx_consumed;
+
+	*next = n;
+	*oldest = (cmd_trace_base() == NULL) ? n :
+	    (n > CMD_TRACE_ENTRIES ? n - CMD_TRACE_ENTRIES : 0u);
+}
+
+extern "C" uint32_t
+vid_link_trace_read(uint32_t from, uint32_t n, uint8_t *bytes,
+    uint8_t *classes)
+{
+	const uint8_t *trace = cmd_trace_base();
+	uint32_t oldest, next, got = 0;
+
+	vid_link_trace_span(&oldest, &next);
+	if (trace == NULL || from < oldest)
+		return 0;
+	while (got < n && from + got < next) {
+		const uint32_t at =
+		    ((from + got) & (CMD_TRACE_ENTRIES - 1u)) * 2u;
+
+		bytes[got] = trace[at];
+		classes[got] = trace[at + 1u];
+		got++;
+	}
+	return got;
+}
+
+extern "C" void
+vid_link_trace_print(uint32_t n)
+{
+	uint32_t oldest, next;
+
+	if (cmd_trace_base() == NULL) {
+		printf("Trace:       no storage — the PSRAM probe found"
+		       " nothing, so no bytes were kept\n");
+		return;
+	}
+	vid_link_trace_span(&oldest, &next);
+	if (n > next - oldest)
+		n = next - oldest;
+	printf("Trace:       %lu bytes consumed; showing the last %lu"
+	       " (holds %lu)\n", (unsigned long)next, (unsigned long)n,
+	       (unsigned long)CMD_TRACE_ENTRIES);
+	printf("             |start .subcode  param ~payload Lloopback;"
+	       " offsets match \"cons\" in status\n");
+
+	/* Sixteen to a line, each marked by the role it played. The marks
+	 * are the point: a dropped byte shows as a command whose parameters
+	 * run into the next command's start -- a "|" where a parameter
+	 * should be, or a sub-code where a coordinate was expected. */
+	static const char mark[5] = { '|', '.', ' ', '~', 'L' };
+	uint32_t at = next - n;
+
+	while (at < next) {
+		uint8_t b[16], c[16];
+		const uint32_t line = (next - at < 16u) ? next - at : 16u;
+		const uint32_t got = vid_link_trace_read(at, line, b, c);
+
+		printf("  %8lu ", (unsigned long)at);
+		for (uint32_t i = 0; i < 16u; i++) {
+			if (i < got)
+				printf("%c%02X", c[i] < 5u ? mark[c[i]] : '?',
+				    b[i]);
+			else
+				printf("   ");
+		}
+		printf("  ");
+		for (uint32_t i = 0; i < got; i++)
+			putchar((b[i] >= 0x20u && b[i] < 0x7Fu) ? b[i] : '.');
+		putchar('\n');
+		if (got == 0u)
+			break;		/* overwritten under us: stop, not spin */
+		at += got;
+	}
 }
 
 extern "C" bool

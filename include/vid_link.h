@@ -267,6 +267,19 @@ void vid_link_print_status(void);
  * this is how anything that needs "done" asks for it. */
 bool vid_link_idle(void);
 
+/* The COMMAND TRACE (render core only): the last CMD_TRACE_ENTRIES bytes the
+ * renderer consumed, each with its VID_BYTE_* class, addressed by ABSOLUTE
+ * offset -- the same count "status" reports as "cons", which never resets, so
+ * an offset quoted from a dump lines up with the guest's own byte map.
+ * span() gives the oldest offset still held and the next to be written; read()
+ * copies up to n entries starting at `from`, returning how many it copied
+ * (entries already overwritten, or not yet written, are not returned).
+ * print() dumps the most recent n. With no storage, all three say so. */
+void vid_link_trace_span(uint32_t *oldest, uint32_t *next);
+uint32_t vid_link_trace_read(uint32_t from, uint32_t n, uint8_t *bytes,
+    uint8_t *classes);
+void vid_link_trace_print(uint32_t n);
+
 /* The consumer contract: the glass-TTY / command-interpreter layer
  * (vid_console.cpp — portable, shared with the simulator) implements
  * these. consume_begin() precedes each burst (the console uses it to lift
@@ -288,6 +301,18 @@ void vid_link_consume(uint8_t byte);
 void vid_link_consume_flush(void);
 void vid_link_consume_reset(void);
 bool vid_link_consume_busy(void);
+
+/* The ROLE the next byte will play in the framing, asked just before each
+ * byte is handed to consume(). The command trace records it beside the byte,
+ * so a dump shows where every command starts -- and therefore exactly where
+ * the framing went wrong, if it ever does. */
+uint8_t vid_link_consume_class(void);
+
+#define VID_BYTE_START		0u	/* begins a command, or is plain text */
+#define VID_BYTE_SUBCODE	1u	/* the sub-code after $1B */
+#define VID_BYTE_PARAM		2u	/* a fixed parameter of a command */
+#define VID_BYTE_PAYLOAD	3u	/* GPLoad's streamed data */
+#define VID_BYTE_LOOPBACK	4u	/* echoed in loopback, never interpreted */
 
 #ifdef __cplusplus
 }

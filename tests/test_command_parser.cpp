@@ -214,6 +214,40 @@ TEST_CASE("usb with no arguments is rejected", "[parser][usb]")
 	CHECK_FALSE(run("usb").ok);
 }
 
+TEST_CASE("psram, selftest and trace parse, with their aliases", "[parser]")
+{
+	/* Added to the firmware without parser tests at first -- the gap this
+	 * tree exists to close, since nothing in the firmware build runs it. */
+	CHECK(run("psram").cmd.tag    == CMD_PSRAM);
+	CHECK(run("ps").cmd.tag       == CMD_PSRAM);
+	CHECK(run("selftest").cmd.tag == CMD_SELFTEST);
+	CHECK(run("se").cmd.tag       == CMD_SELFTEST);
+	CHECK(run("trace").cmd.tag    == CMD_TRACE);
+	CHECK(run("tr").cmd.tag       == CMD_TRACE);
+	CHECK(run("psram").ok);
+	CHECK(run("selftest").ok);
+}
+
+TEST_CASE("trace: count defaults to 256 and is DECIMAL", "[parser][trace]")
+{
+	CHECK(run("trace").cmd.trace.count == 256u);
+
+	/* Decimal, like status's period, because a byte count is read by a
+	 * person comparing it with an offset -- and 1024 read as hex would be
+	 * 4132, silently showing four times what was asked for. */
+	auto r = run("tr 1024");
+	REQUIRE(r.ok);
+	CHECK(r.cmd.tag == CMD_TRACE);
+	CHECK(r.cmd.trace.count == 1024u);
+}
+
+TEST_CASE("trace: zero and non-decimal counts are rejected", "[parser][trace]")
+{
+	CHECK_FALSE(run("trace 0").ok);
+	CHECK_FALSE(run("trace ab").ok);
+	CHECK_FALSE(run("trace 12 34").ok);
+}
+
 TEST_CASE("unknown commands are rejected", "[parser]")
 {
 	Result r = run("frobnicate");
