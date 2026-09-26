@@ -1130,24 +1130,55 @@ void vidterm_buf_get(uint8_t group, uint8_t id, int x, int y, int w, int h)
 
     b->xsize = (uint16_t)w;
     b->ysize = (uint16_t)h;
+
+    /* A ROW AT A TIME, not a pixel at a time. Both operands live in PSRAM
+     * behind the QMI, reached through the uncached alias -- it has to be
+     * uncached, because the XIP cache is not write-through for PSRAM and the
+     * per-core caches are not coherent. So every BUS ACCESS here is its own
+     * QSPI transaction: command, address, dummy cycles, then data. The
+     * command and address dominate, which is why a byte cost about 150 ns
+     * against the 19 ns a 53 MB/s bandwidth figure suggests, and why the fix
+     * is fewer, wider accesses rather than faster ones.
+     *
+     * The off-panel bound from the per-pixel version is kept, and is now
+     * three explicit spans instead of a test per pixel: the guest chooses
+     * these coordinates and nothing else clips them, so an off-panel
+     * rectangle used to index shadow_row_real[] past its end and read past a
+     * shadow row -- benign-looking on a host, a potential bus fault on
+     * hardware, where PSRAM beyond the declared region faults. Off-panel
+     * pixels still read as 0. */
+    const int px0 = origin_x + x;
+    int lo = px0 < 0 ? 0 : px0;			/* first on-panel column */
+    int hi = px0 + w > FB_WIDTH ? FB_WIDTH : px0 + w;	/* one past last */
+
+    if (hi < lo)
+        hi = lo;
     for (int row = 0; row < h; row++) {
         const int py = origin_y + y + row;
+        uint8_t *dst = &p[(size_t)row * (size_t)w];
+        const uint8_t *srow;
 
-        for (int col = 0; col < w; col++) {
-            const int px = origin_x + x + col;
-
-            /* BOUNDED, because this is the one path that reads the plane at
-             * coordinates the guest chose without going through plot's clip.
-             * An off-panel rectangle indexed shadow_row_real[] past its end
-             * and read past a shadow row -- harmless-looking on a host, where
-             * it is one array overrunning into another, and a potential bus
-             * fault on hardware, where PSRAM beyond the declared region is
-             * configured to fault. Off-panel pixels read as the background
-             * rather than as whatever is next in memory. */
-            p[(size_t)row * w + col] =
-                (px >= 0 && px < FB_WIDTH && py >= 0 && py < FB_HEIGHT) ?
-                shadow_peek(px, py) : 0u;
+        if (py < 0 || py >= FB_HEIGHT) {
+            memset(dst, 0, (size_t)w);		/* wholly off-panel */
+            continue;
         }
+        /* The margins, where the rectangle hangs off the side. */
+        if (lo > px0)
+            memset(dst, 0, (size_t)(lo - px0));
+        if (px0 + w > hi)
+            memset(&dst[hi - px0], 0, (size_t)(px0 + w - hi));
+        if (hi <= lo)
+            continue;
+        /* The middle. A row nothing has drawn on is the uniform colour by
+         * definition, so it is a memset of SRAM and costs no QSPI traffic at
+         * all -- which is the common case for a mostly-clear screen and the
+         * reason the plane is kept implicit. */
+        srow = shadow_row_ro(py);
+        if (srow == NULL)
+            memset(&dst[lo - px0], shadow_uniform_colour,
+                   (size_t)(hi - lo));
+        else
+            memcpy(&dst[lo - px0], &srow[lo], (size_t)(hi - lo));
     }
 }
 
@@ -1165,10 +1196,56 @@ void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y)
 
     if (p == NULL || b->xsize == 0 || b->ysize == 0)
         return;
-    for (int row = 0; row < b->ysize; row++)
-        for (int col = 0; col < b->xsize; col++)
-            plot_unlocked(x + col, y + row,
-                          p[(size_t)row * b->xsize + col]);
+
+    const int w = b->xsize, h = b->ysize;
+
+    /* A mix mode or a fill pattern makes every pixel depend on what is
+     * already there, or on where it lands, so there is nothing to copy in
+     * bulk -- take the per-pixel path, which is also the one that defines
+     * what those modes MEAN. Correctness first: this is the fallback, and it
+     * is the original routine unchanged. */
+    if (logic_mode != LOGIC_NORMAL || fill_patterned) {
+        for (int row = 0; row < h; row++)
+            for (int col = 0; col < w; col++)
+                plot_unlocked(x + col, y + row,
+                              p[(size_t)row * (size_t)w + col]);
+        return;
+    }
+
+    /* The ordinary stamp, a row at a time. Three things made the per-pixel
+     * version cost what it did, and the first two are QSPI transactions:
+     * reading the source byte from the buffer in PSRAM, and writing the
+     * shadow byte to PSRAM. At roughly 150 ns each (command, address, dummy
+     * cycles, one byte -- the overhead IS the cost) a 32x32 stamp paid about
+     * 300 us before touching the framebuffer.
+     *
+     * NO STAGING BUFFER, deliberately. The framebuffer row has to be written
+     * anyway, and once written it holds exactly the bytes the shadow wants,
+     * so it IS the staging area: one bulk read PSRAM->framebuffer, then one
+     * bulk write framebuffer->shadow. A separate staging array would have
+     * cost SRAM this design has not got: the device-role build has 648 bytes
+     * left before the link fails (measured -- a 1 KB static in the PSRAM
+     * benchmark proved it by failing), which is also why the flood fill's
+     * seed stack is bounded at 96. */
+    const int px0 = origin_x + x;
+    int lo = px0 < clip_x0 ? clip_x0 : px0;
+    int hi = px0 + w > clip_x1 ? clip_x1 : px0 + w;
+
+    if (hi <= lo)
+        return;				/* wholly outside the clip */
+    for (int row = 0; row < h; row++) {
+        const int py = origin_y + y + row;
+        const size_t n = (size_t)(hi - lo);
+        uint8_t *srow;
+
+        if (py < clip_y0 || py >= clip_y1)
+            continue;
+        memcpy(&video_framebuffer[py][lo],
+               &p[(size_t)row * (size_t)w + (size_t)(lo - px0)], n);
+        srow = shadow_row(py);
+        if (srow != NULL)
+            memcpy(&srow[lo], &video_framebuffer[py][lo], n);
+    }
 }
 
 /* ───────────────────────────── flood fill ───────────────────────────────── */
@@ -1178,10 +1255,19 @@ void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y)
  * not one entry per pixel, which is what makes a bound of this size workable
  * where a per-pixel stack would need thousands.
  *
- * Bounded because there is about 7 KB of SRAM spare and a flood fill over a
+ * Bounded because SRAM here is effectively full and a flood fill over a
  * 1024x480 plane cannot be allowed to decide for itself how much of it to
  * take. Recursion was never an option for the same reason: the C stack here
  * is 4 KB a core.
+ *
+ * HOW full, measured 2026-09-26 rather than estimated: the device-role build
+ * has 648 BYTES between the end of .bss and the declared heap, so that is all
+ * a new static may take before the link fails outright (a 1 KB array did
+ * exactly that). The host-role build has about 3.4 KB. An earlier version of
+ * this comment said "about 7 KB", which was stale and is the sort of figure
+ * that invites a decision it cannot support -- so it is now a measurement
+ * with a date on it. Re-measure with arm-none-eabi-size before adding
+ * anything of any size.
  *
  * WHEN THE BOUND IS REACHED the seed is dropped and counted. The region then
  * fills incompletely, which is visibly wrong -- but it is wrong in a way that
