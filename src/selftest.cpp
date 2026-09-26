@@ -466,6 +466,53 @@ test_blit_timing(void)
 		    8000u);
 	}
 	vidterm_buf_kill(G, ID);
+
+	/* A PATTERNED FLOOD FILL of the whole panel, with a pattern containing
+	 * the target colour -- the case VID-034 broke: it painted 6,144 of
+	 * 491,520 pixels. The two-pass fill that replaced it logs its spans to
+	 * uncached PSRAM, and that path has never run anywhere but the
+	 * simulator, where the log is an array; wgfx has no patterned FFill to
+	 * exercise it. So check every pixel, check nothing was dropped or left
+	 * solid, and time it -- which also measures the cost of a large
+	 * patterned fill that has so far only been estimated. */
+	{
+		static const uint8_t CHECKER[4] = { 0xFF, 0x00, 0x00, 0xFF };
+		uint32_t over0, flat0, over1, flat1;
+
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00u);
+		vidterm_buf_define(G, ID, 4u);
+		vidterm_buf_shape(G, ID, 2u, 2u);
+		for (uint32_t i = 0; i < 4u; i++)
+			(void)vidterm_buf_poke(G, ID, i, CHECKER[i]);
+		vidterm_set_pattern(G, ID);
+		vidterm_fill_stats(&over0, &flat0);
+
+		const uint32_t f0 = time_us_32();
+		vidterm_flood_fill(10, 10, 0xFFu);
+		const uint32_t fus = time_us_32() - f0;
+
+		vidterm_fill_stats(&over1, &flat1);
+		vidterm_set_pattern(0u, 0u);
+		vidterm_buf_kill(G, ID);
+
+		uint32_t bad = 0;
+		for (int y = 0; y < FB_HEIGHT; y++)
+			for (int x = 0; x < FB_WIDTH; x++)
+				if (video_framebuffer[y][x] !=
+				    CHECKER[(y & 1) * 2 + (x & 1)])
+					bad++;
+		if (bad != 0u || over1 != over0 || flat1 != flat0) {
+			char d[96];
+
+			snprintf(d, sizeof(d), "%lu px wrong, %lu seeds dropped,"
+			    " %lu spans solid", (unsigned long)bad,
+			    (unsigned long)(over1 - over0),
+			    (unsigned long)(flat1 - flat0));
+			result("patterned FFill, full panel", false, d);
+		} else {
+			timed("patterned FFill, full panel", fus, 150000u);
+		}
+	}
 }
 
 void
