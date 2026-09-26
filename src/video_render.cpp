@@ -26,14 +26,12 @@
 
 #define TRANSPARENT_BG  0x00
 
-/* Force -O3 on hot rendering functions regardless of the build type. Only GCC
- * implements the optimize function attribute; clang-based toolchains (ATfE)
- * reject it, so there the macro is empty and the build's own level applies. */
-#if defined(__GNUC__) && !defined(__clang__)
-#define OPTIMIZE_O3 __attribute__((optimize("O3")))
-#else
-#define OPTIMIZE_O3
-#endif
+/* This file is compiled at -O3 in every optimised build, by CMakeLists.txt,
+ * not by a function attribute. The attribute that used to do it was GCC-only
+ * -- clang rejects it -- so it was an empty macro in the one build that
+ * actually gets flashed (RelWithDebInfo with ATfE), and the hot blitter ran at
+ * -O2 there for its whole life while this comment said otherwise. A build
+ * rule cannot quietly become a no-op when the compiler changes. */
 
 /* GPIO_HSTX_BASE / GPIO_HSTX_COUNT come from the shared pin map. */
 
@@ -532,7 +530,7 @@ cell_row_get(const uint8_t *src, uint32_t *w0, uint32_t *w1)
  * than once per cell -- or, as it was, once per background PIXEL through
  * shadow_peek(), each a call into another translation unit that itself called
  * win_store_slots(). */
-static void OPTIMIZE_O3
+static void
 blit_char_cell(int col, int row, const uint8_t *sbase)
 {
     uint8_t ch   = text_cells[row][col];

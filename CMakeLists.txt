@@ -206,6 +206,17 @@ endif()
 set_source_files_properties(src/mem_ops.c PROPERTIES
 	COMPILE_OPTIONS "${_mem_ops_flags}")
 
+# The renderer at -O3 in every optimised build, whatever the build type and
+# whichever compiler. It used to be a GCC-only function attribute on the text
+# blitter, empty under clang -- so the image actually flashed (RelWithDebInfo,
+# ATfE) ran the hot path at -O2 while the source claimed -O3 (VID-030). A
+# per-source option works for both compilers and cannot silently become a
+# no-op. Appended after the build type's own flags, so it is the last -O on
+# the line and wins. NOT in Debug builds: -O3 would make the renderer
+# impossible to step through, which is the one thing a Debug build is for.
+set_property(SOURCE src/video_render.cpp APPEND PROPERTY
+	COMPILE_OPTIONS "$<$<NOT:$<CONFIG:Debug>>:-O3>")
+
 # The BUILD IDENTITY, compiled in so the running board can say what it is.
 # This exists because it was got wrong in conversation: five agent trees were
 # Release while the image actually being flashed was RelWithDebInfo/ATfE, and
