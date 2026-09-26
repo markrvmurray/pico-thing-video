@@ -2,8 +2,9 @@
  *
  * PORTABLE (see hid_cook.h). The USB HID usage IDs and modifier bits are
  * spelled out below rather than taken from tusb.h, which is what lets this
- * file compile host-side; usb_host.cpp static_asserts them against TinyUSB's
- * own values so the two cannot drift apart unnoticed.
+ * file compile host-side. They are fixed by the HID Usage Tables, not by
+ * TinyUSB; what usb_host.cpp static_asserts against TinyUSB is the REPORT
+ * SIZES, the part that could drift. The usim suite checks every mapping.
  *
  * Copyright (c) 2026 Mark R V Murray.
  * SPDX-License-Identifier: BSD-2-Clause
@@ -57,7 +58,24 @@ enum : uint8_t {
 	KEY_COMMA = 0x36, KEY_PERIOD = 0x37, KEY_SLASH = 0x38,
 	KEY_CAPS_LOCK = 0x39,
 	KEY_F1 = 0x3A, KEY_F12 = 0x45,
+	KEY_RIGHT = 0x4F, KEY_LEFT = 0x50, KEY_DOWN = 0x51, KEY_UP = 0x52,
+	KEY_NUM_LOCK = 0x53,
+	KEY_KP_SLASH = 0x54, KEY_KP_STAR = 0x55, KEY_KP_MINUS = 0x56,
+	KEY_KP_PLUS = 0x57, KEY_KP_ENTER = 0x58,
+	KEY_KP_1 = 0x59, KEY_KP_2 = 0x5A, KEY_KP_3 = 0x5B, KEY_KP_4 = 0x5C,
+	KEY_KP_5 = 0x5D, KEY_KP_6 = 0x5E, KEY_KP_7 = 0x5F, KEY_KP_8 = 0x60,
+	KEY_KP_9 = 0x61, KEY_KP_0 = 0x62, KEY_KP_DOT = 0x63,
 	KEY_EUROPE_2 = 0x64,
+};
+
+/* The arrows send the OS-9 cursor bytes: up $0C, down $0A, left $08, right
+ * $09. That is the convention the guest's own tools already read (ded, and
+ * the Wildbits PS/2 driver, which faces the same PC keyboard), so a program
+ * written for a CoCo keyboard works unchanged. Its price is inherent: left is
+ * Backspace's byte and right is Tab's, and the guest cannot tell them apart.
+ * Modifiers do not change them, as in that driver. */
+enum : uint8_t {
+	OS9_UP = 0x0C, OS9_DOWN = 0x0A, OS9_LEFT = 0x08, OS9_RIGHT = 0x09,
 };
 
 /* The function keys reach the guest as $80-$8B, one per key, F1 first.
@@ -169,8 +187,27 @@ echo_key(const char *event, uint8_t kc, uint8_t mod, int sent, const char *why)
  *  £ = 0x9C, ¬ = 0xAA.
  * ======================================================================== */
 static uint8_t
-uk_cook(uint8_t kc, bool shift, bool caps)
+uk_cook(uint8_t kc, bool shift, bool caps, bool num)
 {
+	/* The numeric keypad. With Num Lock on it types the same bytes as the
+	 * main keys; off, its 8/2/4/6 are the arrows, as on a PC. Its editing
+	 * keys (7 Home, 1 End, 9 PgUp, 3 PgDn, 0 Ins, . Del) send nothing,
+	 * like the dedicated ones: OS-9 has no convention for them yet. The
+	 * operators and Enter do not depend on Num Lock. */
+	if (kc >= KEY_KP_1 && kc <= KEY_KP_DOT) {
+		static const char numeric[] = "1234567890.";
+
+		if (num)
+			return (uint8_t)numeric[kc - KEY_KP_1];
+		switch (kc) {
+		case KEY_KP_8: return OS9_UP;
+		case KEY_KP_2: return OS9_DOWN;
+		case KEY_KP_4: return OS9_LEFT;
+		case KEY_KP_6: return OS9_RIGHT;
+		default:       return 0;
+		}
+	}
+
 	/* Letters: case is shift XOR caps-lock. */
 	if (kc >= KEY_A && kc <= KEY_Z) {
 		bool upper = shift ^ caps;
@@ -193,6 +230,17 @@ uk_cook(uint8_t kc, bool shift, bool caps)
 	case KEY_F1 + 4: case KEY_F1 + 5: case KEY_F1 + 6: case KEY_F1 + 7:
 	case KEY_F1 + 8: case KEY_F1 + 9: case KEY_F1 + 10: case KEY_F12:
 		return (uint8_t)(KEY_FN_BASE + (kc - KEY_F1));
+
+	case KEY_UP:            return OS9_UP;
+	case KEY_DOWN:          return OS9_DOWN;
+	case KEY_LEFT:          return OS9_LEFT;
+	case KEY_RIGHT:         return OS9_RIGHT;
+
+	case KEY_KP_SLASH:      return '/';
+	case KEY_KP_STAR:       return '*';
+	case KEY_KP_MINUS:      return '-';
+	case KEY_KP_PLUS:       return '+';
+	case KEY_KP_ENTER:      return 0x0D;
 
 	case KEY_ENTER:         return 0x0D;  /* CR: the OS-9 line terminator
 	                                       * (and the guest input contract) */
@@ -221,6 +269,7 @@ uk_cook(uint8_t kc, bool shift, bool caps)
 /* Previous report's held keys, to detect key-down transitions. */
 static uint8_t kbd_prev[6];
 static bool    caps_lock;
+static bool    num_lock = true;	/* the PC's usual state at power-on */
 
 /* AUTO-REPEAT. A USB keyboard does not repeat: it reports which keys are
  * held, and usually only when that changes, so repeat is the host's job --
@@ -230,9 +279,9 @@ static bool    caps_lock;
  *
  * One key repeats: the most recent to go down that produced a byte. Any new
  * key-down ends the current repeat (as on a PC), and a release ends it too.
- * Not repeated: Caps Lock, and the function keys -- they are the guest's to
- * spend on things like switching windows, and a held F-key cycling windows
- * is not a feature. A repeat produces what the key produces NOW, with the
+ * Not repeated: Caps Lock, Num Lock, and the function keys -- the last are
+ * the guest's to spend on things like switching windows, and a held F-key
+ * cycling windows is not a feature. The arrows do repeat. A repeat produces what the key produces NOW, with the
  * modifiers of the latest report, so pressing Shift mid-repeat changes case.
  *
  * TIME IS PUSHED IN (hid_cook_tick), like the echo flag, so this file stays
@@ -261,7 +310,7 @@ cook_key(uint8_t kc, uint8_t mod)
 {
 	const bool shift = (mod & (MOD_LEFTSHIFT | MOD_RIGHTSHIFT)) != 0;
 	const bool ctrl  = (mod & (MOD_LEFTCTRL  | MOD_RIGHTCTRL))  != 0;
-	uint8_t c = uk_cook(kc, shift, caps_lock);
+	uint8_t c = uk_cook(kc, shift, caps_lock, num_lock);
 
 	if (ctrl && c != 0) {
 		uint8_t u = (c >= 'a' && c <= 'z') ? (uint8_t)(c - 0x20) : c;
@@ -353,6 +402,12 @@ hid_cook_keyboard(const uint8_t *report, unsigned len)
 			caps_lock = !caps_lock;	/* toggle on press */
 			echo_key("down", kc, mod, -1,
 			    caps_lock ? "Caps Lock now ON" : "Caps Lock now OFF");
+			continue;
+		}
+		if (kc == KEY_NUM_LOCK) {
+			num_lock = !num_lock;	/* toggle on press */
+			echo_key("down", kc, mod, -1,
+			    num_lock ? "Num Lock now ON" : "Num Lock now OFF");
 			continue;
 		}
 
@@ -495,6 +550,7 @@ hid_cook_reset(void)
 	for (int i = 0; i < 6; i++)
 		kbd_prev[i] = 0;
 	caps_lock = false;
+	num_lock = true;
 	rpt_key = 0;
 	rpt_mod = 0;
 	rpt_armed = false;
@@ -505,3 +561,4 @@ hid_cook_reset(void)
 int  hid_cook_cursor_x(void)  { return cursor_x; }
 int  hid_cook_cursor_y(void)  { return cursor_y; }
 bool hid_cook_caps_lock(void) { return caps_lock; }
+bool hid_cook_num_lock(void)  { return num_lock; }

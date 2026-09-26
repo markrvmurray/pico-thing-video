@@ -54,6 +54,7 @@ void hid_cook_reset(void);
 int  hid_cook_cursor_x(void);
 int  hid_cook_cursor_y(void);
 bool hid_cook_caps_lock(void);
+bool hid_cook_num_lock(void);
 
 #ifdef __cplusplus
 }
