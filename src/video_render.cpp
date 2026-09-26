@@ -631,6 +631,107 @@ blit_char_cell(int col, int row, const uint8_t *sbase)
     }
 }
 
+/* Up to RUN_CELLS neighbouring dirty cells of one text row, with any
+ * transparent ones reading the shadow a PIXEL ROW AT A TIME across the run.
+ *
+ * blit_char_cell() walks one cell top to bottom, so its shadow reads are
+ * eight bytes and then a 1 KB jump to the next pixel row. Measured ("psram",
+ * 2026-09-26) that is 345 ns per 8 bytes, where 8 bytes following on from
+ * the last cost 188 -- the QMI continues a transfer when the next address is
+ * consecutive, and re-sends command and address when it is not. A refresh
+ * over drawn graphics paid the strided price on every row of every cell.
+ * Here each pixel row of the run is read as one consecutive slice, into a
+ * buffer, back to back, and only then composed: a new transaction per slice
+ * rather than per cell.
+ *
+ * Eight cells, so the slice is 64 bytes on a 2 KB stack -- the same budget
+ * paint_span() keeps. Wider would amortise the one strided open per slice a
+ * little further; it is a small fraction of what remains.
+ *
+ * Only runs WITH a transparent cell come here with a reason to; a run
+ * without one reads no PSRAM, and goes cell by cell as before, so opaque
+ * text pays nothing for this. */
+#define RUN_CELLS 8
+
+static void
+blit_cell_run(int row, int c0, uint32_t bits, const uint8_t *sbase)
+{
+    uint32_t fgw[RUN_CELLS], bgw[RUN_CELLS];
+    uint8_t chs[RUN_CELLS];
+    uint32_t transp = 0;
+
+    for (uint32_t b = bits; b != 0u; b &= b - 1u) {
+        const int i = __builtin_ctz(b);
+        const uint8_t attr = text_attrs[row][c0 + i];
+
+        chs[i] = text_cells[row][c0 + i];
+        fgw[i] = (uint32_t)attr_to_fg(attr) * 0x01010101u;
+        bgw[i] = (uint32_t)attr_to_bg(attr) * 0x01010101u;
+        if ((attr & 0x01) != 0 && sbase != NULL)
+            transp |= 1u << i;
+    }
+    if (transp == 0u) {
+        for (uint32_t b = bits; b != 0u; b &= b - 1u)
+            blit_char_cell(c0 + __builtin_ctz(b), row, sbase);
+        return;
+    }
+
+    /* The slice spans the first to the last TRANSPARENT cell; opaque cells
+     * between them are read and ignored, which is cheaper than breaking the
+     * run in two. */
+    const int lo = __builtin_ctz(transp);
+    const int words = (32 - __builtin_clz(transp) - lo) * 2;
+    const uint32_t uniw = (uint32_t)shadow_uniform_colour * 0x01010101u;
+    const int x = c0 * CHAR_W;
+    const int y = row * CHAR_H;
+    uint32_t slice[RUN_CELLS * 2];
+
+    for (int gy = 0; gy < CHAR_H; gy++) {
+        const bool real = shadow_row_real[y + gy];
+        uint8_t *line = &video_framebuffer[y + gy][x];
+
+        /* All of the row's PSRAM reads, consecutive and uninterrupted. */
+        if (real) {
+            const uint32_t *src = (const uint32_t *)__builtin_assume_aligned(
+                &sbase[(size_t)(y + gy) * FB_WIDTH +
+                       (size_t)(x + lo * CHAR_W)], 4);
+
+            for (int w = 0; w < words; w++)
+                slice[lo * 2 + w] = src[w];
+        }
+
+        for (uint32_t b = bits; b != 0u; b &= b - 1u) {
+            const int i = __builtin_ctz(b);
+            const uint8_t mask = font_row(chs[i], gy);
+            uint8_t *cell = &line[i * CHAR_W];
+            uint32_t b0, b1;
+
+            if (mask == 0xFF) {
+                cell_row_put(cell, fgw[i], fgw[i]);
+                continue;
+            }
+            if ((transp & (1u << i)) == 0u) {
+                b0 = b1 = bgw[i];
+            } else if (real) {
+                b0 = slice[i * 2];
+                b1 = slice[i * 2 + 1];
+            } else {
+                b0 = b1 = uniw;
+            }
+            if (mask == 0x00) {
+                cell_row_put(cell, b0, b1);
+                continue;
+            }
+
+            const uint32_t m0 = glyph_expand[mask >> 4];
+            const uint32_t m1 = glyph_expand[mask & 0x0Fu];
+
+            cell_row_put(cell, (fgw[i] & m0) | (b0 & ~m0),
+                         (fgw[i] & m1) | (b1 & ~m1));
+        }
+    }
+}
+
 /* Instrumentation, because this has now been diagnosed wrongly twice. The
  * render timer says a call was slow; it cannot say whether the time went into
  * the text blitter or a drawing primitive, and both can be provoked by a
@@ -678,15 +779,19 @@ static bool render_dirty_rows(int max_rows)
         }
         rows_done++;
 
-        for (int col = 0; col < TEXT_COLS; col++) {
-            int word = col >> 5;
-            uint32_t bit = 1u << (col & 31);
-            if (dirty_rows[row][word] & bit) {
-                blit_char_cell(col, row, sbase);
-                blitted++;
-                dirty_rows[row][word] &= ~bit;
+        static_assert(32 % RUN_CELLS == 0 && TEXT_COLS % RUN_CELLS == 0,
+                      "a run is a whole slice of one dirty word");
+        for (int c0 = 0; c0 < TEXT_COLS; c0 += RUN_CELLS) {
+            const uint32_t bits = (dirty_rows[row][c0 >> 5] >> (c0 & 31)) &
+                                  ((1u << RUN_CELLS) - 1u);
+
+            if (bits != 0u) {
+                blit_cell_run(row, c0, bits, sbase);
+                blitted += (uint32_t)__builtin_popcount(bits);
             }
         }
+        for (int w = 0; w < DIRTY_WORDS; w++)
+            dirty_rows[row][w] = 0;
     }
     blit_cells_total += blitted;
     if (blitted > blit_cells_max)
