@@ -99,6 +99,7 @@ static uint32_t frames_missed_burst;	// most missed between two services
 static uint32_t core0_epoch_frame;	/* video_frames at loop entry */
 static uint32_t service_last_us;	/* when the overlay service last ran */
 static uint32_t service_max_us;		/* worst interval between two services */
+static bool core0_settled;		/* boot figures discarded yet? */
 
 /* Clear the figures that only grow, so a second measurement condition starts
  * from nothing rather than inheriting the first one's worst case. */
@@ -198,6 +199,9 @@ core0_load_print(void)
 	printf("Text blit:   %lu cells, worst refresh %lu (full screen %u)\n",
 	       (unsigned long)blit_total, (unsigned long)blit_worst,
 	       (unsigned)(TEXT_COLS * TEXT_ROWS));
+	printf("Core0 figures: %s\n", core0_settled ?
+	       "steady state (bring-up discarded after 60 frames)" :
+	       "INCLUDING BRING-UP — not yet settled");
 	printf("Service:     worst gap %lu us (frame %lu us)%s\n",
 	       (unsigned long)service_max_us, (unsigned long)period,
 	       (period && service_max_us > period) ? "  LATE" : "");
@@ -411,6 +415,31 @@ main()
 				core0_serviced_frame = f;
 
 				const uint32_t t0 = time_us_32();
+				// DISCARD THE BRING-UP FIGURES, ONCE. Bring-up
+				// legitimately stalls this loop for a long
+				// time -- probing PSRAM, clearing the panel,
+				// enumerating USB -- and every figure here is a
+				// maximum, so one boot-time stall poisons the
+				// page for the rest of the run. Observed: a
+				// worst service gap of 514,705 us reported
+				// identically before and after a workload, with
+				// LATE beside it permanently. That is exactly
+				// the fault the frames-missed count already had
+				// (a boot constant read as evidence about
+				// steady state), and this counter was added to
+				// fix that one -- so it inherited the disease
+				// it was meant to cure.
+				//
+				// A second of frames is long enough for the
+				// display and USB to settle and short enough
+				// that nothing interesting has happened yet.
+				if (!core0_settled && f > 60u) {
+					core0_settled = true;
+					core0_load_reset();
+					core0_serviced_frame = f;
+					service_last_us = time_us_32();
+					continue;
+				}
 				// How long this core actually took to come
 				// back round, which is the figure the skip
 				// count cannot express below two frames.
