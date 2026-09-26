@@ -433,8 +433,31 @@ main()
 				// A second of frames is long enough for the
 				// display and USB to settle and short enough
 				// that nothing interesting has happened yet.
-				if (!core0_settled && f > 60u) {
-					core0_settled = true;
+				// Two reasons this interval may not be ours to
+				// count, and both were being counted.
+				//
+				// Bring-up: probing PSRAM, clearing the panel
+				// and enumerating a USB hub with two devices
+				// behind it legitimately stall this loop, and
+				// every figure here is a maximum, so one such
+				// stall poisons the page for the whole run.
+				// 300 frames rather than 60 because enumeration
+				// was observed still running past a second.
+				//
+				// The console: an operator asking for the
+				// status page pushes about two kilobytes at
+				// 115200 baud, which is most of a fifth of a
+				// second with this core blocked in printf, and
+				// a benchmark command blocks it for longer
+				// still. Observed as a 465 ms worst gap with
+				// LATE beside it on a board running nothing at
+				// all -- a measurement of the measuring, which
+				// is the least useful thing an instrument can
+				// report.
+				if ((!core0_settled && f > 300u) ||
+				    console_consumed_time()) {
+					if (f > 300u)
+						core0_settled = true;
 					core0_load_reset();
 					core0_serviced_frame = f;
 					service_last_us = time_us_32();

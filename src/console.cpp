@@ -371,6 +371,17 @@ static bool console_prompted = false;
 // one input character. Non-blocking, so the caller's loop can interleave
 // other Core 0 work (power sensing in particular) between characters. The
 // console runs in standby too — it must stay alive when main power is off.
+static bool console_blocked;
+
+bool
+console_consumed_time(void)
+{
+	const bool was = console_blocked;
+
+	console_blocked = false;
+	return was;
+}
+
 void
 console_poll(void)
 {
@@ -389,6 +400,7 @@ console_poll(void)
 		if (ch == '\r' || ch == '\n') {
 			putchar('\n');
 			buf[idx] = '\0';
+			console_blocked = true;
 			process_command(buf);
 			idx = 0;
 			console_prompted = false;

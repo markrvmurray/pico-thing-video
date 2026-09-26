@@ -17,6 +17,15 @@ extern "C" {
  * has never been started. */
 void console_poll(void);
 
+/* TRUE once since the last call if the console did something that blocked this
+ * core for a human-visible time -- ran a command, or printed a page. The
+ * caller uses it to re-baseline its own service-interval measurement, because
+ * an operator asking for two kilobytes of status at 115200 baud stalls the
+ * loop for most of a fifth of a second and that is not a rendering fault. It
+ * was being recorded as one: a worst gap of 465 ms, with LATE beside it, on a
+ * board doing nothing else at all. */
+bool console_consumed_time(void);
+
 /* Reprint the prompt, after something else has written to the console. */
 void console_reprompt(void);
 
