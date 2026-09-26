@@ -89,5 +89,24 @@ target_include_directories(test_adc_convert PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
 )
 target_link_libraries(test_adc_convert PRIVATE Catch2::Catch2WithMain)
+# ---------------------------------------------------------------------------
+# test_mem_ops: the firmware's own memcpy/memmove/memset/bzero, exhaustively.
+# Compiled from the firmware source under renamed symbols, and freestanding so
+# the host compiler cannot swap the loops for calls to its own library -- which
+# would silently test the host's memcpy instead of ours.
+# ---------------------------------------------------------------------------
+add_library(mem_ops_host OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_ops.c)
+target_compile_definitions(mem_ops_host PRIVATE MEM_OPS_TEST_NAMES=1)
+target_compile_options(mem_ops_host PRIVATE -ffreestanding -fno-builtin)
+add_executable(test_mem_ops test_mem_ops.cpp $<TARGET_OBJECTS:mem_ops_host>)
+target_link_libraries(test_mem_ops PRIVATE Catch2::Catch2WithMain)
+catch_discover_tests(test_mem_ops)
+# The object must DEFINE the renamed routines and REFERENCE no library mem
+# routine. Both halves matter: a first version checked only the second, and
+# passed on an object that had not been renamed at all -- a check reading
+# clean because it was looking at the wrong thing.
+add_test(NAME mem_ops_no_libc_calls COMMAND sh -c
+    "o='$<TARGET_OBJECTS:mem_ops_host>'; for f in memcpy memmove memset bzero; do nm \"$o\" | grep -Eq \" T _?t_$f$\" || { echo \"t_$f not defined\"; exit 1; }; done; ! nm -u \"$o\" | grep -E '(^|[^a-z_])_?_?(memcpy|memmove|memset|bzero)$'")
+
 catch_discover_tests(test_command_parser)
 catch_discover_tests(test_adc_convert)

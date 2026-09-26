@@ -173,6 +173,7 @@ add_executable(pico-thing-video
 		src/win_store.cpp
 		src/vid_link.cpp
 		src/video.cpp
+		src/mem_ops.c
 		src/psram_bench.cpp
 		src/selftest.cpp
 		src/video_render.cpp
@@ -192,6 +193,17 @@ target_compile_definitions(pico-thing-video PRIVATE PICO_AUTO_DETECT_PSRAM_SIZE=
 if(SELFTEST)
 	target_compile_definitions(pico-thing-video PRIVATE SELFTEST=1)
 endif()
+
+# Our own memcpy/memmove/memset/bzero, because every C library ATfE ships is a
+# SIZE build whose versions move one byte per iteration (see mem_ops.c). These
+# flags are not optional: without them a compiler may recognise a copy loop as
+# "a memcpy" and replace it with a call to memcpy -- from inside memcpy.
+set(_mem_ops_flags -ffreestanding -fno-builtin)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+	list(APPEND _mem_ops_flags -fno-tree-loop-distribute-patterns)
+endif()
+set_source_files_properties(src/mem_ops.c PROPERTIES
+	COMPILE_OPTIONS "${_mem_ops_flags}")
 
 # The BUILD IDENTITY, compiled in so the running board can say what it is.
 # This exists because it was got wrong in conversation: five agent trees were
