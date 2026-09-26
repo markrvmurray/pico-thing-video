@@ -489,32 +489,55 @@ void vidterm_shadow_reset(uint8_t colour)
 
 /* ────────────────────── text cell rendering (blitting) ──────────────────── */
 
-/* A glyph row is exactly CHAR_W bytes and starts CHAR_W-aligned, so it is two
- * aligned words. Written inline rather than through memset: at eight bytes a
- * call costs more than the stores it makes, and there are sixteen of them per
- * cell and 3840 cells in a full-screen refresh. */
-static inline void
-fill_cell_row(uint8_t *line, uint8_t colour)
-{
-    const uint32_t v = (uint32_t)colour * 0x01010101u;
-    uint32_t w[2] = { v, v };
+/* A glyph row is eight 1-bit pixels; the framebuffer row it lands on is eight
+ * BYTES. This table widens four mask bits to four byte-lane masks at once, so
+ * a row is composed as two words -- (fg AND mask) OR (background AND NOT mask)
+ * -- instead of eight tested, branched, byte-sized stores. Pixel 0 is the most
+ * significant bit of the mask and the LOWEST address, hence byte 0 of the word
+ * on a little-endian part (asserted below). const, so it lives in flash and
+ * costs none of the SRAM this board has not got. */
+static const uint32_t glyph_expand[16] = {
+    0x00000000u, 0xFF000000u, 0x00FF0000u, 0xFFFF0000u,
+    0x0000FF00u, 0xFF00FF00u, 0x00FFFF00u, 0xFFFFFF00u,
+    0x000000FFu, 0xFF0000FFu, 0x00FF00FFu, 0xFFFF00FFu,
+    0x0000FFFFu, 0xFF00FFFFu, 0x00FFFFFFu, 0xFFFFFFFFu,
+};
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+              "glyph_expand puts pixel 0 in byte 0 of each word");
 
-    /* The alignment has to be ASSERTED. Rows are 4-aligned and CHAR_W is 8,
-     * so every cell starts on a word -- but the compiler cannot see that
-     * through the pointer arithmetic, and without the hint it emits eight
-     * byte stores, which is what it was doing before this was a "fast path"
-     * at all. Checked in the disassembly, not assumed. */
+/* Eight framebuffer or shadow bytes as two words. Both a cell row and a shadow
+ * row are 4-aligned (rows are 1024 bytes, cells 8), but the compiler cannot see
+ * that through the arithmetic and would otherwise emit byte accesses -- the
+ * mistake fill_cell_row once made while calling itself a fast path -- so the
+ * alignment is ASSERTED, and memcpy keeps it free of aliasing casts. */
+static inline void
+cell_row_put(uint8_t *line, uint32_t w0, uint32_t w1)
+{
+    const uint32_t w[2] = { w0, w1 };
+
     memcpy(__builtin_assume_aligned(line, 4), w, CHAR_W);
 }
 
+static inline void
+cell_row_get(const uint8_t *src, uint32_t *w0, uint32_t *w1)
+{
+    uint32_t w[2];
+
+    memcpy(w, __builtin_assume_aligned(src, 4), CHAR_W);
+    *w0 = w[0];
+    *w1 = w[1];
+}
+
+/* sbase is the graphics shadow, fetched ONCE per refresh by the caller rather
+ * than once per cell -- or, as it was, once per background PIXEL through
+ * shadow_peek(), each a call into another translation unit that itself called
+ * win_store_slots(). */
 static void OPTIMIZE_O3
-blit_char_cell(int col, int row)
+blit_char_cell(int col, int row, const uint8_t *sbase)
 {
     uint8_t ch   = text_cells[row][col];
     uint8_t attr = text_attrs[row][col];
 
-    uint8_t fg = attr_to_fg(attr);
-    uint8_t bg = attr_to_bg(attr);
     /* Transparency is the attr's bit0 flag, NOT a colour sentinel.
      *
      * It used to mean "leave the pixel alone", which is why the console could
@@ -527,67 +550,61 @@ blit_char_cell(int col, int row)
      * back to painting its background -- text hides graphics exactly as it
      * always did, rather than ghosting. Degrading to the old behaviour beats
      * degrading to a broken one. */
-    bool transparent = (attr & 0x01) != 0 && gfx_shadow_base() != NULL;
+    const bool transparent = (attr & 0x01) != 0 && sbase != NULL;
+    const uint32_t fgw = (uint32_t)attr_to_fg(attr) * 0x01010101u;
+    const uint32_t bgw = (uint32_t)attr_to_bg(attr) * 0x01010101u;
+    const uint32_t uniw = (uint32_t)shadow_uniform_colour * 0x01010101u;
+    const int x = col * CHAR_W;
+    const int y = row * CHAR_H;
 
-    int x = col * CHAR_W;
-    int y = row * CHAR_H;
-
+    /* WHAT THIS REPLACED, measured on hardware over a full 3840-cell refresh:
+     * 22.1 ms opaque, 26.9 ms transparent, 62.5 ms transparent over drawn
+     * graphics -- 3.8 frames. Mixed rows went pixel by pixel, and every
+     * transparent background pixel called shadow_peek(): flag checks, a call
+     * into another file, and a single-byte uncached PSRAM read, which came
+     * out at 73 ns a byte -- slower even than a plain byte loop. Now each row
+     * is at most two 32-bit shadow reads, one table lookup per half and two
+     * word stores. */
     for (int gy = 0; gy < CHAR_H; gy++) {
-        uint8_t mask = font_row(ch, gy);
+        const uint8_t mask = font_row(ch, gy);
         uint8_t *line = &video_framebuffer[y + gy][x];
+        uint32_t b0, b1;
 
-        /* A uniform row is the common one, not a curiosity. A space is
-         * blank in all sixteen of its rows, and after any clear, scroll or
-         * erase most of the grid is spaces -- so the whole-screen refresh
-         * that follows a clear is almost entirely this case. Testing the
-         * mask once and filling beats testing it once per pixel: eight
-         * branches and eight byte stores become one run. */
-        if (mask == 0x00) {
-            /* A blank cell restores the graphics under it. The row may not
-             * have been materialised -- most of the plane never is, that
-             * being the point -- in which case the answer is the uniform
-             * colour, not a read from a null row.
-             *
-             * This tested shadow_any_real and dereferenced the row pointer
-             * regardless, so a blank cell in an UNMATERIALISED row while
-             * some OTHER row was real read from &((uint8_t *)0)[x]: address
-             * x, which is 0 to 1016, which is the bootrom. It rendered
-             * bootrom bytes into the framebuffer as pixels -- a block of
-             * unrelated-looking content, only in the regions where no
-             * graphics had been drawn, and only in cells that text had
-             * touched. Precisely the shape of corruption reported from
-             * hardware.
-             *
-             * No test caught it because a test either clears and draws
-             * nothing (no row real, so the safe branch) or draws over what
-             * it checks (the row real). It needs a screen that is part
-             * drawn and part not, which is every real screen and no
-             * contrived one. */
-            const uint8_t *src = transparent ? shadow_row_ro(y + gy) : NULL;
-
-            if (!transparent)
-                fill_cell_row(line, bg);
-            else if (src != NULL)
-                memcpy(line, &src[x], CHAR_W);
-            else
-                fill_cell_row(line, shadow_uniform_colour);
-            continue;
-        }
+        /* A solid row needs no background, so it must not pay a PSRAM
+         * read to find one. */
         if (mask == 0xFF) {
-            fill_cell_row(line, fg);
+            cell_row_put(line, fgw, fgw);
             continue;
         }
 
-        for (int gx = 0; gx < CHAR_W; gx++) {
-            bool is_fg = (mask & (0x80 >> gx)) != 0;
-
-            if (is_fg)
-                line[gx] = fg;
-            else if (!transparent)
-                line[gx] = bg;
-            else
-                line[gx] = shadow_peek(x + gx, y + gy);
+        /* The background: the cell's own colour, or the graphics plane.
+         * An unmaterialised shadow row IS the uniform colour -- most of the
+         * plane never is, that being the point -- and must never be read.
+         * This once tested shadow_any_real and dereferenced the row pointer
+         * regardless, so a cell in an undrawn row, while some OTHER row was
+         * real, read from address x: 0 to 1016, the bootrom, rendered as
+         * pixels. It needs a screen part drawn and part not to show, which
+         * is every real screen and no contrived one. */
+        if (!transparent) {
+            b0 = b1 = bgw;
+        } else if (shadow_row_real[y + gy]) {
+            cell_row_get(&sbase[(size_t)(y + gy) * FB_WIDTH + (size_t)x],
+                         &b0, &b1);
+        } else {
+            b0 = b1 = uniw;
         }
+
+        /* A blank row -- every space, and most of any cleared screen -- is
+         * just the background. */
+        if (mask == 0x00) {
+            cell_row_put(line, b0, b1);
+            continue;
+        }
+
+        const uint32_t m0 = glyph_expand[mask >> 4];
+        const uint32_t m1 = glyph_expand[mask & 0x0Fu];
+
+        cell_row_put(line, (fgw & m0) | (b0 & ~m0), (fgw & m1) | (b1 & ~m1));
     }
 }
 
@@ -617,6 +634,9 @@ void vidterm_blit_reset(void)
 static void render_dirty_cells(void)
 {
     uint32_t blitted = 0;
+    /* Once per refresh: the storage cannot change underneath a refresh, and
+     * asking per cell was a cross-file call chain paid 3840 times. */
+    const uint8_t *sbase = gfx_shadow_base();
 
     for (int row = 0; row < TEXT_ROWS; row++) {
         {
@@ -629,7 +649,7 @@ static void render_dirty_cells(void)
             int word = col >> 5;
             uint32_t bit = 1u << (col & 31);
             if (dirty_rows[row][word] & bit) {
-                blit_char_cell(col, row);
+                blit_char_cell(col, row, sbase);
                 blitted++;
                 dirty_rows[row][word] &= ~bit;
             }

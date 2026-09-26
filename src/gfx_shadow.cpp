@@ -11,7 +11,11 @@
 #include "gfx_shadow.h"
 #include "win_store.h"		/* shares the probe's verdict */
 
-static uint8_t __uninitialized_psram("gfxshadow") shadow[GFX_SHADOW_BYTES];
+/* Word-aligned EXPLICITLY. The text blitter reads the plane as 32-bit words at
+ * cell boundaries; left to section placement it happened to land on a
+ * megabyte boundary, which is luck rather than a guarantee. */
+static uint8_t __uninitialized_psram("gfxshadow") shadow[GFX_SHADOW_BYTES]
+    __attribute__((aligned(4)));
 
 uint8_t *
 gfx_shadow_base(void)
