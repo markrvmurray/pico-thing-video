@@ -1922,12 +1922,185 @@ static inline void fill_span_abs(int px0, int px1, int py, uint8_t colour)
     shadow_fill_span(px0, px1, py, colour);
 }
 
-void vidterm_flood_fill(int x, int y, uint8_t colour)
+/* A FLOOD FILL IS A JOB, done a slice at a time (VID-036).
+ *
+ * A full-panel fill measured 19.7 ms plain and 22.5 ms patterned -- more than
+ * a frame, in one render call, on the core that owes the overlay service its
+ * deadline -- and about 10 ms of either is the shadow write, which no
+ * optimisation can remove. So the fill is bounded the way the text refresh
+ * is: vidterm_flood_fill_start() sets it up, and each vidterm_fill_continue()
+ * does a slice and says whether more is owed. The console reports it as owed
+ * drawing AND as a HOLD, so the link drains nothing further until it is done.
+ * The hold is not optional: this fill finds its way by the colours in the
+ * framebuffer, so a Line or a glyph landing mid-fill would become a wall that
+ * was not there when the guest asked, and the region would come out
+ * differently. Stream order is exactly what it was when the fill ran in one
+ * go.
+ *
+ * Everything the fill reads that a command could change -- clip, origin,
+ * pattern, mix mode -- is only changed by commands, which the hold keeps
+ * back, so the state that matters here is just the job's own. It stays in
+ * SRAM (a few dozen bytes); the stack and the span log are in PSRAM, which is
+ * what lets a fill be suspended at all. With no PSRAM the stack is on the
+ * starting call's frame and cannot outlive it, so that fill runs to the end
+ * inside start(), bounded only by its small stack, as it always was.
+ *
+ * SLICE SIZE. The work counted is pixels a slice scans (the parent segment's
+ * extent) plus pixels it claims, or pixels it paints in the second pass --
+ * the two costs the fill actually has. At the measured full-panel costs
+ * (~20 ns a unit searching and claiming plain, ~25 ns a pixel painting) the
+ * budgets below come to about 4 ms a slice, the same third of a frame the
+ * drain and the text refresh are held to. That derivation is from a model;
+ * the self-test times the worst slice on the hardware to check it. */
+#define FILL_SLICE_WORK		196608u
+#define FILL_SLICE_PAINT	131072u
+
+enum { FILL_IDLE = 0, FILL_SEARCH, FILL_PAINT };
+
+static struct {
+    uint32_t *stack;		/* PSRAM, or the fallback on start()'s frame */
+    uint32_t  sp, max;
+    uint32_t *log;		/* the span log, for a two-pass fill */
+    uint32_t  logged, painted;
+    uint8_t   phase, target, colour;
+    bool      plain;
+} fj;
+
+bool vidterm_fill_pending(void)
+{
+    return fj.phase != FILL_IDLE;
+}
+
+/* A link reset drops the fill where it stands: the guest has asked for a
+ * clean slate, and finishing a fill it no longer expects would draw over it. */
+void vidterm_fill_abort(void)
+{
+    fj.phase = FILL_IDLE;
+    fj.stack = NULL;
+}
+
+/* Stack the segment [a, b] of row y for a look at row y + dy -- if that row
+ * is inside the clip at all. */
+static inline void fill_push(int y, int a, int b, int dy)
+{
+    if (y + dy < clip_y0 || y + dy >= clip_y1)
+        return;
+    if (fj.sp < fj.max)
+        fj.stack[fj.sp++] = seg_pack(y, a, b, dy);
+    else
+        fill_overflows++;
+}
+
+/* Claim the run [a, b] of row y: fill it and, for a two-pass fill, log it for
+ * painting. */
+static inline void fill_claim(int y, int a, int b)
+{
+    if (fj.plain) {
+        fill_span_abs(a, b + 1, y, fj.colour);
+        return;
+    }
+    memset(&video_framebuffer[y][a], fj.colour, (size_t)(b + 1 - a));
+    if (fj.log != NULL && fj.logged < FILL_LOG_SPANS) {
+        fj.log[fj.logged++] = span_pack(y, a, b);
+    } else {
+        /* Past the log's end, or no PSRAM: this span stays solid. Visibly
+         * unpatterned, but consistent -- the shadow gets the same bytes --
+         * and COUNTED, like a dropped segment. */
+        shadow_fill_span(a, b + 1, y, fj.colour);
+        fill_log_overflows++;
+    }
+}
+
+/* One slice: at most `work` units of searching, or `paint` pixels of
+ * painting. True while more is owed. */
+static bool fill_step(uint32_t work, uint32_t paint)
+{
+    const uint8_t target = fj.target;
+
+    if (fj.phase == FILL_SEARCH) {
+        uint32_t done = 0;
+
+        while (fj.sp > 0u) {
+            if (done >= work)
+                return true;
+
+            const uint32_t seg = fj.stack[--fj.sp];
+            const int dy = (seg & (1u << 29)) ? -1 : 1;
+            const int y = (int)((seg >> 20) & 0x1FFu) + dy;
+            const int x1 = (int)((seg >> 10) & 0x3FFu);
+            const int x2 = (int)(seg & 0x3FFu);
+            const uint8_t *const row = video_framebuffer[y];
+
+            done += (uint32_t)(x2 + 1 - x1);
+
+            /* Every unfilled run of row y that touches the parent's
+             * extent. Work stacked earlier may already have filled some
+             * or all of it; a run that is gone is simply not found. */
+            for (int x = x1;;) {
+                x = run_find(row, x, x2 + 1, target);
+                if (x > x2)
+                    break;
+
+                /* The run may reach past the parent at either end. */
+                const int a = run_start(row, x, clip_x0, target);
+                const int b = run_end(row, x, clip_x1, target) - 1;
+
+                fill_claim(y, a, b);
+                done += (uint32_t)(b + 1 - a);
+                fill_push(y, a, b, dy);
+                /* Where it leaks past the parent, the row the parent was
+                 * on is unexplored beneath the leak -- and only there. */
+                if (a < x1)
+                    fill_push(y, a, x1 - 1, -dy);
+                if (b > x2)
+                    fill_push(y, x2 + 1, b, -dy);
+                x = b + 1;
+            }
+        }
+        fj.phase = FILL_PAINT;
+        /* Painting starts on the NEXT slice if this one did any searching,
+         * or a slice could cost a search budget and a paint budget both. */
+        if (done > 0u && fj.painted < fj.logged)
+            return true;
+    }
+
+    if (fj.phase == FILL_PAINT) {
+        /* Pass 2: exactly the spans pass 1 claimed, pattern and mix mode
+         * applied. */
+        uint32_t done = 0;
+
+        while (fj.painted < fj.logged) {
+            if (done >= paint)
+                return true;
+
+            const uint32_t w = fj.log[fj.painted++];
+            const int py = (int)(w >> 20);
+            const int x1 = (int)((w >> 10) & 0x3FFu);
+            const int x2 = (int)(w & 0x3FFu);
+
+            paint_span(py, x1, x2 + 1, fj.colour, NULL);
+            done += (uint32_t)(x2 + 1 - x1);
+        }
+    }
+    vidterm_fill_abort();
+    return false;
+}
+
+bool vidterm_fill_continue(void)
+{
+    return fj.phase != FILL_IDLE && fill_step(FILL_SLICE_WORK, FILL_SLICE_PAINT);
+}
+
+bool vidterm_flood_fill_start(int x, int y, uint8_t colour)
 {
     const int sx = origin_x + x, sy = origin_y + y;
 
+    /* One fill at a time. The hold guarantees it; this makes it so. */
+    if (fj.phase != FILL_IDLE)
+        while (fill_step(UINT32_MAX, UINT32_MAX))
+            ;
     if (sx < clip_x0 || sx >= clip_x1 || sy < clip_y0 || sy >= clip_y1)
-        return;
+        return false;
 
     const uint8_t target = video_framebuffer[sy][sx];
 
@@ -1936,116 +2109,65 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
      * the target after being written, so every neighbour would be seeded
      * again forever. */
     if (target == colour)
-        return;
+        return false;
 
     /* TWO PASSES when the pixels written are not simply `colour` (VID-034).
      * This fill finds its way BY COLOUR -- a pixel equal to the target is
      * one it has not reached -- and a pattern or mix mode breaks that: a
      * pixel just filled can still equal the target (white AND a black
      * pattern pixel, on black), so it re-seeds its own work, overflows the
-     * seed stack and quits with most of the region untouched. Measured on
-     * the host before this: 6,144 of 491,520 pixels.
+     * stack and quits with most of the region untouched. Measured on the
+     * host before this: 6,144 of 491,520 pixels.
      *
      * So pass 1 floods SOLID -- guaranteed to terminate, since every filled
      * pixel then differs from the target -- into the framebuffer ONLY,
      * logging each span. Pass 2 repaints exactly those spans through the
-     * ordinary pixel path, pattern and mix mode applied, framebuffer and
-     * shadow. Pass 1 leaves the shadow alone, so a mix mode still combines
-     * with the true background. The plain fill keeps its single pass. */
-    const bool plain = !pattern_on && logic_mode == LOGIC_NORMAL;
-    uint32_t *const log = plain ? NULL : fill_log_base();
-    uint32_t logged = 0;
+     * span writer, pattern and mix mode applied, framebuffer and shadow.
+     * Pass 1 leaves the shadow alone, so a mix mode still combines with the
+     * true background. The plain fill keeps its single pass. */
+    fj.plain = !pattern_on && logic_mode == LOGIC_NORMAL;
+    fj.log = fj.plain ? NULL : fill_log_base();
+    fj.logged = fj.painted = 0;
+    fj.target = target;
+    fj.colour = colour;
+    fj.sp = 0;
+    fj.stack = fill_seeds_base();
+    fj.max = FILL_SEEDS;
+    fj.phase = FILL_SEARCH;
 
     uint32_t sram_stack[FILL_STACK_SRAM];
-    uint32_t *stack = fill_seeds_base();
-    const uint32_t stack_max = stack != NULL ? FILL_SEEDS : FILL_STACK_SRAM;
 
-    if (stack == NULL)
-        stack = sram_stack;
-
-    uint32_t sp = 0;
-
-    /* Stack the segment [a, b] of row y for a look at row y + dy -- if that
-     * row is inside the clip at all. */
-    auto push = [&](int y, int a, int b, int dy) {
-        if (y + dy < clip_y0 || y + dy >= clip_y1)
-            return;
-        if (sp < stack_max)
-            stack[sp++] = seg_pack(y, a, b, dy);
-        else
-            fill_overflows++;
-    };
-
-    /* Claim the run [a, b] of row y: fill it, and for a two-pass fill, log
-     * it for painting. */
-    auto claim = [&](int y, int a, int b) {
-        if (plain) {
-            fill_span_abs(a, b + 1, y, colour);
-        } else {
-            memset(&video_framebuffer[y][a], colour, (size_t)(b + 1 - a));
-            if (log != NULL && logged < FILL_LOG_SPANS) {
-                log[logged++] = span_pack(y, a, b);
-            } else {
-                /* Past the log's end, or no PSRAM: this span stays solid.
-                 * Visibly unpatterned, but consistent -- the shadow gets
-                 * the same bytes -- and COUNTED, like a dropped segment. */
-                shadow_fill_span(a, b + 1, y, colour);
-                fill_log_overflows++;
-            }
-        }
-    };
+    if (fj.stack == NULL) {
+        fj.stack = sram_stack;
+        fj.max = FILL_STACK_SRAM;
+    }
 
     {
         const uint8_t *const row = video_framebuffer[sy];
         const int a = run_start(row, sx, clip_x0, target);
         const int b = run_end(row, sx, clip_x1, target) - 1;
 
-        claim(sy, a, b);
-        push(sy, a, b, 1);
-        push(sy, a, b, -1);
+        fill_claim(sy, a, b);
+        fill_push(sy, a, b, 1);
+        fill_push(sy, a, b, -1);
     }
 
-    while (sp > 0u) {
-        const uint32_t seg = stack[--sp];
-        const int dy = (seg & (1u << 29)) ? -1 : 1;
-        const int y = (int)((seg >> 20) & 0x1FFu) + dy;
-        const int x1 = (int)((seg >> 10) & 0x3FFu);
-        const int x2 = (int)(seg & 0x3FFu);
-        const uint8_t *const row = video_framebuffer[y];
-
-        /* Every unfilled run of row y that touches the parent's extent.
-         * Work stacked earlier may already have filled some or all of it;
-         * a run that is gone is simply not found. */
-        for (int x = x1;;) {
-            x = run_find(row, x, x2 + 1, target);
-            if (x > x2)
-                break;
-
-            /* The run may reach past the parent at either end. */
-            const int a = run_start(row, x, clip_x0, target);
-            const int b = run_end(row, x, clip_x1, target) - 1;
-
-            claim(y, a, b);
-            push(y, a, b, dy);
-            /* Where it leaks past the parent, the row the parent was on is
-             * unexplored beneath the leak -- and only there. */
-            if (a < x1)
-                push(y, a, x1 - 1, -dy);
-            if (b > x2)
-                push(y, x2 + 1, b, -dy);
-            x = b + 1;
-        }
+    /* The fallback stack dies with this frame, so that fill finishes here. */
+    if (fj.stack == sram_stack) {
+        while (fill_step(UINT32_MAX, UINT32_MAX))
+            ;
+        return false;
     }
+    return true;
+}
 
-    /* Pass 2: exactly the spans pass 1 claimed, through the pixel path. */
-    for (uint32_t i = 0; i < logged; i++) {
-        const uint32_t w = log[i];
-        const int py = (int)(w >> 20);
-        const int x1 = (int)((w >> 10) & 0x3FFu);
-        const int x2 = (int)(w & 0x3FFu);
-
-        paint_span(py, x1, x2 + 1, colour, NULL);
-    }
+/* The whole fill in one call, for callers that must have it finished -- the
+ * self-test, and anything not going through the link. */
+void vidterm_flood_fill(int x, int y, uint8_t colour)
+{
+    if (vidterm_flood_fill_start(x, y, colour))
+        while (vidterm_fill_continue())
+            ;
 }
 
 void vidterm_circle(int cx, int cy, int radius, uint8_t colour)

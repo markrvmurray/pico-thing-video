@@ -185,7 +185,18 @@ void vidterm_select_font(uint8_t group, uint8_t id);
 void vidterm_select_cursor(uint8_t group, uint8_t id);
 void vidterm_set_bold(bool on);
 
+/* Flood fill. vidterm_flood_fill() runs to completion. The link's console
+ * instead STARTS one and continues it a slice per render pass, because a
+ * large fill costs more than a frame: start() returns true when work is
+ * owed, continue() does a slice and returns true while more remains, and
+ * pending() says whether one is in progress. Nothing else may draw while
+ * one is -- the fill finds its way by the framebuffer's colours -- which is
+ * the caller's to guarantee; abort() drops it, for a link reset. */
 void vidterm_flood_fill(int x, int y, uint8_t colour);
+bool vidterm_flood_fill_start(int x, int y, uint8_t colour);
+bool vidterm_fill_continue(void);
+bool vidterm_fill_pending(void);
+void vidterm_fill_abort(void);
 /* overflows: flood-fill seeds dropped (the fill is then incomplete).
  * unpatterned: spans of a patterned or mix-mode FFill filled SOLID because the
  * span log was full or absent. Both must read zero; each is a visible fault. */

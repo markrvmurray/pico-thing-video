@@ -565,6 +565,11 @@ vid_link_render(void)
 		} else {
 			vid_link_consume(b);
 			consumed = true;
+			/* A command that must finish before ANY later byte --
+			 * a flood fill, spread over passes -- stops the drain
+			 * here, not at the end of the budget. */
+			if (vid_link_consume_hold())
+				break;
 		}
 	}
 	/* Whether the bound actually binds is the thing worth knowing: zero

@@ -692,7 +692,12 @@ esc_exec(void)
 		vidterm_set_logic(esc_buf[0]);
 		break;
 	case 0x4Fu:			/* FFill: flood from the draw pointer */
-		vidterm_flood_fill(dp_x, dp_y, fg);
+		/* STARTED, not run: a large fill costs more than a frame, so
+		 * it continues a slice per render pass (consume_flush), and
+		 * the link drains nothing further until it is done
+		 * (consume_hold) -- the fill finds its way by the colours on
+		 * screen, so nothing may draw underneath it. */
+		(void)vidterm_flood_fill_start(dp_x, dp_y, fg);
 		break;
 	case 0x50u:			/* Circle: radius, centred on the pointer */
 		vidterm_ellipse(dp_x, dp_y, p16(0), p16(0), fg);
@@ -929,12 +934,24 @@ vid_link_consume_class(void)
 extern "C" bool
 vid_link_consume_busy(void)
 {
-	return dirty;
+	return dirty || vidterm_fill_pending();
+}
+
+extern "C" bool
+vid_link_consume_hold(void)
+{
+	return vidterm_fill_pending();
 }
 
 extern "C" void
 vid_link_consume_flush(void)
 {
+	/* A flood fill in progress goes first and alone. It was started by a
+	 * byte that came before any text still dirty was drawn, and in one
+	 * go it ran before that text was refreshed, so it still does; and
+	 * the cursor is not parked on a screen that is half filled. */
+	if (vidterm_fill_continue())
+		return;
 	/* Bounded: a full screen of text can cost more than a frame, so the
 	 * refresh does a slice and `dirty` stays set until it is all drawn.
 	 * The link keeps calling back (consume_busy) until then. */
@@ -952,6 +969,8 @@ vid_link_consume_flush(void)
 extern "C" void
 vid_link_consume_reset(void)
 {
+	/* A fill in progress belongs to the stream being thrown away. */
+	vidterm_fill_abort();
 	/* The root window IS the panel, and it must be a real table entry
 	 * before anything can Select back to it -- an uninitialised entry 0
 	 * would hand out a zero-sized rectangle and somebody else's parked

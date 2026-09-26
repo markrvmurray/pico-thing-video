@@ -295,12 +295,21 @@ void vid_link_trace_print(uint32_t n);
  * bytes: stream order is kept exactly as it was when a burst's text was drawn
  * in one go, since nothing from a later burst can run before an earlier
  * burst's drawing is complete. The guest meanwhile waits on TDRE, the same
- * trade the bounded drain already makes. */
+ * trade the bounded drain already makes.
+ *
+ * consume_hold() is TRUE while a command in progress must finish before the
+ * NEXT BYTE is even interpreted -- a flood fill, which is spread over passes
+ * and finds its way by the colours on screen, so anything drawn beneath it
+ * mid-fill would change the region it fills. The drain stops at once when it
+ * rises; busy() then carries the command to completion. Distinct from busy()
+ * on purpose: dirty text must NOT stop the drain, or a line of typing would
+ * cost a render pass a character. */
 void vid_link_consume_begin(void);
 void vid_link_consume(uint8_t byte);
 void vid_link_consume_flush(void);
 void vid_link_consume_reset(void);
 bool vid_link_consume_busy(void);
+bool vid_link_consume_hold(void);
 
 /* The ROLE the next byte will play in the framing, asked just before each
  * byte is handed to consume(). The command trace records it beside the byte,

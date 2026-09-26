@@ -511,7 +511,7 @@ test_blit_timing(void)
 			    (unsigned long)(flat1 - flat0));
 			result("patterned FFill, full panel", false, d);
 		} else {
-			timed("patterned FFill, full panel", fus, 34000u);
+			timed("patterned FFill, full panel", fus, 24000u);
 		}
 
 		/* ATTRIBUTION. The patterned FFill above measured 65.5 ms after
@@ -530,7 +530,10 @@ test_blit_timing(void)
 		 * about 1.5x the figures after the search went word-wise and a
 		 * patterned span became one period copied along the row (22.5,
 		 * 19.7 and 12.5 ms on 2026-09-26), so a regression towards either
-		 * old cost fails rather than passing inside a loose budget. */
+		 * old cost fails rather than passing inside a loose budget. The
+		 * fill then stacked parent segments and stopped rescanning the
+		 * row it came from: 16.0 and 13.2 ms, and the two FFill budgets
+		 * followed them down. */
 		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00u);
 		uint32_t t1 = time_us_32();
 		vidterm_flood_fill(10, 10, 0xFFu);
@@ -540,7 +543,7 @@ test_blit_timing(void)
 			result("FFill, full panel, plain", false,
 			    "did not fill the panel - timing meaningless");
 		else
-			timed("FFill, full panel, plain", plain_us, 30000u);
+			timed("FFill, full panel, plain", plain_us, 20000u);
 
 		vidterm_buf_define(G, ID, 4u);
 		vidterm_buf_shape(G, ID, 2u, 2u);
@@ -559,6 +562,54 @@ test_blit_timing(void)
 			    "pattern not applied - timing meaningless");
 		else
 			timed("patterned Bar, full panel", bar_us, 19000u);
+
+		/* ONE SLICE of a flood fill -- what the render core actually
+		 * pays per pass now that a guest's FFill is spread over passes
+		 * instead of run in one call. The figures above are whole
+		 * fills, done synchronously; this starts a full-panel
+		 * patterned fill (the costlier kind: a search, then painting)
+		 * and times every slice, keeping the worst. The slice budgets
+		 * in video_render.cpp were derived from a cost model to land
+		 * near 4 ms; this is the check on that model. It has to prove
+		 * it was sliced at all -- one slice would mean the budget
+		 * never bound, and "worst slice" would be the whole fill --
+		 * and that the fill finished. */
+		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00u);
+		vidterm_buf_define(G, ID, 4u);
+		vidterm_buf_shape(G, ID, 2u, 2u);
+		for (uint32_t i = 0; i < 4u; i++)
+			(void)vidterm_buf_poke(G, ID, i, CHECKER[i]);
+		vidterm_set_pattern(G, ID);
+
+		uint32_t worst = 0, slices = 0;
+		t1 = time_us_32();
+		bool more = vidterm_flood_fill_start(10, 10, 0xFFu);
+		worst = time_us_32() - t1;
+		while (more) {
+			const uint32_t s0 = time_us_32();
+
+			more = vidterm_fill_continue();
+			const uint32_t us = time_us_32() - s0;
+
+			if (us > worst)
+				worst = us;
+			slices++;
+		}
+		vidterm_set_pattern(0u, 0u);
+		vidterm_buf_kill(G, ID);
+
+		char d[80];
+
+		if (slices < 2u ||
+		    video_framebuffer[FB_HEIGHT - 1][FB_WIDTH - 1] !=
+		    CHECKER[((FB_HEIGHT - 1) % 2) * 2 + (FB_WIDTH - 1) % 2]) {
+			snprintf(d, sizeof(d), "%lu slices, or the fill did not"
+			    " finish - timing meaningless",
+			    (unsigned long)slices);
+			result("one FFill slice, worst", false, d);
+		} else {
+			timed("one FFill slice, worst", worst, 8000u);
+		}
 	}
 }
 
