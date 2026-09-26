@@ -1783,31 +1783,31 @@ void vidterm_buf_put(uint8_t group, uint8_t id, int x, int y)
 
 /* Seeds waiting to be grown. A SCANLINE fill, so what is stacked is one seed
  * per run of unfilled pixels on the row above or below a completed span --
- * not one entry per pixel, which is what makes a bound of this size workable
- * where a per-pixel stack would need thousands.
+ * not one entry per pixel.
  *
- * Bounded because SRAM here is effectively full and a flood fill over a
- * 1024x480 plane cannot be allowed to decide for itself how much of it to
- * take. Recursion was never an option for the same reason: the C stack here
- * is 4 KB a core.
+ * The stack lives in PSRAM (fill_log.h), one packed word a seed. It was a
+ * 96-entry static in SRAM, sized by what SRAM could spare rather than by what
+ * a picture needs, and an ordinary busy region overflowed it by hundreds --
+ * dropping seeds and leaving holes (VID-037). Recursion was never an option:
+ * the C stack here is 4 KB a core.
  *
- * HOW full, measured 2026-09-26 rather than estimated: the device-role build
- * has 648 BYTES between the end of .bss and the declared heap, so that is all
- * a new static may take before the link fails outright (a 1 KB array did
- * exactly that). The host-role build has about 3.4 KB. An earlier version of
- * this comment said "about 7 KB", which was stale and is the sort of figure
- * that invites a decision it cannot support -- so it is now a measurement
- * with a date on it. Re-measure with arm-none-eabi-size before adding
- * anything of any size.
+ * With no PSRAM there is nowhere large to put it, so a small stack on the
+ * call's own frame stands in, and the fill degrades to what it always was:
+ * bounded, and counted when the bound is reached. That costs SRAM only for
+ * the length of the call, where the static cost it permanently.
  *
  * WHEN THE BOUND IS REACHED the seed is dropped and counted. The region then
  * fills incompletely, which is visibly wrong -- but it is wrong in a way that
  * stops, rather than one that corrupts memory, and the counter says it
  * happened rather than leaving someone to wonder why a shape has a notch in
  * it. */
-#define FILL_STACK_MAX	96u
+#define FILL_STACK_SRAM	64u
 
-static struct { int16_t x, y; } fill_stack[FILL_STACK_MAX];
+static inline uint32_t seed_pack(int x, int y)
+{
+    return ((uint32_t)y << 10) | (uint32_t)x;
+}
+
 static uint32_t fill_overflows;		/* seeds dropped */
 static uint32_t fill_log_overflows;	/* spans filled solid, not patterned */
 
@@ -1948,15 +1948,20 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
     uint32_t *const log = plain ? NULL : fill_log_base();
     uint32_t logged = 0;
 
-    unsigned sp = 0;
-    fill_stack[sp].x = (int16_t)sx;
-    fill_stack[sp].y = (int16_t)sy;
-    sp++;
+    uint32_t sram_stack[FILL_STACK_SRAM];
+    uint32_t *stack = fill_seeds_base();
+    const uint32_t stack_max = stack != NULL ? FILL_SEEDS : FILL_STACK_SRAM;
+
+    if (stack == NULL)
+        stack = sram_stack;
+
+    uint32_t sp = 0;
+    stack[sp++] = seed_pack(sx, sy);
 
     while (sp > 0u) {
-        sp--;
-        const int py = fill_stack[sp].y;
-        int px = fill_stack[sp].x;
+        const uint32_t seed = stack[--sp];
+        const int py = (int)(seed >> 10);
+        const int px = (int)(seed & 0x3FFu);
 
         /* A seed can be stale: another span may have reached it between
          * being pushed and being popped. */
@@ -1994,10 +1999,8 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
                 i = run_find(nrow, i, x2 + 1, target);
                 if (i > x2)
                     break;
-                if (sp < FILL_STACK_MAX) {
-                    fill_stack[sp].x = (int16_t)i;
-                    fill_stack[sp].y = (int16_t)ny;
-                    sp++;
+                if (sp < stack_max) {
+                    stack[sp++] = seed_pack(i, ny);
                 } else {
                     fill_overflows++;
                 }

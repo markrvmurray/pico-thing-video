@@ -10,6 +10,7 @@
 #include "win_store.h"		/* shares the probe's verdict */
 
 static uint32_t __uninitialized_psram("filllog") spans[FILL_LOG_SPANS];
+static uint32_t __uninitialized_psram("fillseeds") seeds[FILL_SEEDS];
 
 uint32_t *
 fill_log_base(void)
@@ -17,5 +18,14 @@ fill_log_base(void)
 	if (win_store_slots() == 0u)
 		return NULL;
 	return (uint32_t *)((uintptr_t)spans +
+	    (XIP_NOCACHE_NOALLOC_BASE - XIP_BASE));
+}
+
+uint32_t *
+fill_seeds_base(void)
+{
+	if (win_store_slots() == 0u)
+		return NULL;
+	return (uint32_t *)((uintptr_t)seeds +
 	    (XIP_NOCACHE_NOALLOC_BASE - XIP_BASE));
 }

@@ -72,7 +72,7 @@ result(const char *name, bool ok, const char *detail)
  * PSRAM layout: everything we declared fits, and nothing overlaps.
  *
  * Cheap, instant, and it catches a class of fault that otherwise presents as
- * inexplicable corruption a long way from its cause. Three regions are
+ * inexplicable corruption a long way from its cause. Several regions are
  * carved out of PSRAM by separate translation units; if a size is raised
  * past the part, or two regions were to be placed on top of each other, the
  * symptom is a guest buffer changing under the guest, or text erasing to the
@@ -96,7 +96,7 @@ test_psram_layout(void)
 
 	/* Declared sizes against the part. */
 	const size_t want = GFX_SHADOW_BYTES + GFX_BUFPOOL_BYTES +
-	    CMD_TRACE_BYTES + FILL_LOG_BYTES +
+	    CMD_TRACE_BYTES + FILL_LOG_BYTES + FILL_SEEDS_BYTES +
 	    (size_t)win_store_slots() * WIN_STORE_SLOT_BYTES;
 
 	snprintf(d, sizeof(d), "need %u KB of %u KB",
@@ -122,6 +122,7 @@ test_psram_layout(void)
 		{ "bufs", (uintptr_t)bufs, GFX_BUFPOOL_BYTES },
 		{ "trace", (uintptr_t)cmd_trace_base(), CMD_TRACE_BYTES },
 		{ "filllog", (uintptr_t)fill_log_base(), FILL_LOG_BYTES },
+		{ "fillseeds", (uintptr_t)fill_seeds_base(), FILL_SEEDS_BYTES },
 		{ "windows", (uintptr_t)win_store_slot(0),
 		    (size_t)win_store_slots() * WIN_STORE_SLOT_BYTES },
 	};
