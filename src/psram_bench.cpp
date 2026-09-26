@@ -114,6 +114,64 @@ psram_bench(void)
 	report("read, 32-bit", time_us_32() - t0, BENCH_BYTES,
 	    BENCH_BYTES / 4u);
 
+	/* SEQUENTIAL versus STRIDED. Every figure above reads CONSECUTIVE
+	 * addresses, and that turned out to matter more than width. At 106.7 MHz
+	 * an isolated 4-byte quad read needs command, 24-bit address, dummy
+	 * cycles and data -- about 22 clocks, ~200 ns -- yet the 32-bit loop
+	 * above measured 93. The difference is presumably the QMI continuing a
+	 * transfer when the next address follows on, instead of re-sending the
+	 * command and address. The text blitter does NOT read like that: it
+	 * takes 8 bytes from one shadow row and then jumps 1024 bytes to the
+	 * next pixel row, and its measured cost (326 ns per 8 bytes) fits an
+	 * isolated transaction almost every time.
+	 *
+	 * So read the same number of 8-byte groups three ways: consecutive,
+	 * one per 1 KB row (the blitter's pattern), and one per 1 KB row in
+	 * reverse. If strided costs roughly twice sequential, the model is
+	 * confirmed and the fix is the refresh's LOOP ORDER -- walk a pixel row
+	 * across the cells so their eight-byte slices are consecutive -- not
+	 * anything about width. */
+	{
+		volatile const uint32_t *w = (volatile const uint32_t *)p8;
+		const unsigned groups = GFX_SHADOW_BYTES / 1024u;	/* 480 */
+		const unsigned reps = 16u;
+		uint32_t sink = 0;
+
+		t0 = time_us_32();
+		for (unsigned r = 0; r < reps; r++)
+			for (unsigned g = 0; g < groups; g++) {
+				const unsigned i = (r * groups + g) * 2u;
+
+				sink += w[i];
+				sink += w[i + 1u];
+			}
+		report("8 B groups, consecutive", time_us_32() - t0,
+		    reps * groups * 8u, reps * groups);
+
+		t0 = time_us_32();
+		for (unsigned r = 0; r < reps; r++)
+			for (unsigned g = 0; g < groups; g++) {
+				const unsigned i = g * 256u + r * 2u;
+
+				sink += w[i];
+				sink += w[i + 1u];
+			}
+		report("8 B groups, 1 KB stride", time_us_32() - t0,
+		    reps * groups * 8u, reps * groups);
+
+		t0 = time_us_32();
+		for (unsigned r = 0; r < reps; r++)
+			for (unsigned g = groups; g-- != 0u;) {
+				const unsigned i = g * 256u + r * 2u;
+
+				sink += w[i];
+				sink += w[i + 1u];
+			}
+		report("8 B groups, 1 KB stride rev", time_us_32() - t0,
+		    reps * groups * 8u, reps * groups);
+		acc += sink;
+	}
+
 	/* memcpy both ways -- what the renderer now actually does, AT THE
 	 * SIZES IT ACTUALLY USES. Timing a big block would flatter the result:
 	 * per-call overhead amortises away over a kilobyte, and the renderer

@@ -324,14 +324,15 @@ test_blit_timing(void)
 	 * the glyph path actually draws pixels. The console is transparent by
 	 * default, so the last two are what an ordinary screen of text pays.
 	 *
-	 * Budgets are deliberately loose for now: they exist to catch a
-	 * regression once a baseline is known, and there is not one yet. */
+	 * Budgets are set about 1.5x the first measurement after the blitter
+	 * was made word-wise (7.4, 8.7 and 28.7 ms on 2026-09-26), so a
+	 * regression back towards per-pixel work fails rather than hides. */
 	vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00u);	/* implicit */
 	(void)vidterm_clear('M', 0x00u);
-	timed_refresh("text refresh, opaque", 40000u);
+	timed_refresh("text refresh, opaque", 11000u);
 
 	(void)vidterm_clear('M', 0x01u);
-	timed_refresh("text refresh, transp, implicit", 40000u);
+	timed_refresh("text refresh, transp, implicit", 13000u);
 
 	/* Two part-height bars make every shadow row real: a single
 	 * full-panel fill would take the shortcut and leave them implicit. */
@@ -339,7 +340,7 @@ test_blit_timing(void)
 	vidterm_fill_rect(0, FB_HEIGHT / 2, FB_WIDTH, FB_HEIGHT - FB_HEIGHT / 2,
 	    0x12u);
 	(void)vidterm_clear('M', 0x01u);
-	timed_refresh("text refresh, transp, resident", 60000u);
+	timed_refresh("text refresh, transp, resident", 40000u);
 
 	/* Forty 32x32 stamps -- the wgfx gem scene. Before the row rewrite
 	 * this was about 300 us a stamp, 12 ms for the forty, because every
