@@ -1184,8 +1184,129 @@ static inline void put_pixel_abs(int px, int py, uint8_t src)
  * pattern notes above. */
 #define PAINT_CHUNK 64
 
+/* Combine n bytes of the mix base into dst in place. The mode is decided
+ * once, outside the loop, and each loop is plain enough to run a byte a
+ * cycle or two -- the per-pixel three-way choice was a large part of the
+ * ~60 ns a pixel the generic loop cost. */
+static void mix_into(uint8_t *dst, const uint8_t *base, int n)
+{
+    switch (logic_mode) {
+    case LOGIC_AND: for (int i = 0; i < n; i++) dst[i] &= base[i]; break;
+    case LOGIC_OR:  for (int i = 0; i < n; i++) dst[i] |= base[i]; break;
+    default:        for (int i = 0; i < n; i++) dst[i] ^= base[i]; break;
+    }
+}
+
+static void mix_uniform(uint8_t *dst, uint8_t b, int n)
+{
+    switch (logic_mode) {
+    case LOGIC_AND: for (int i = 0; i < n; i++) dst[i] &= b; break;
+    case LOGIC_OR:  for (int i = 0; i < n; i++) dst[i] |= b; break;
+    default:        for (int i = 0; i < n; i++) dst[i] ^= b; break;
+    }
+}
+
+/* The patterned colour for n pixels starting at absolute x0 on row py:
+ * colour AND the pattern, tiled from the window origin.
+ *
+ * With no source image the row is PERIODIC -- it repeats every pattern
+ * width -- so only one period is composed and the rest is copied, doubling
+ * each time. The period is first grown to a multiple of four bytes, so every
+ * copy after it has source and destination aligned alike and moves words;
+ * a pattern three pixels wide would otherwise copy a byte at a time for the
+ * width of the panel. The pattern row comes through copy_from_psram() when
+ * it lives in PSRAM, so a wide pattern is read once a row, a word at a
+ * time, instead of a byte per pixel. */
+static void pattern_row(uint8_t *dst, int n, int py, int x0, uint8_t colour)
+{
+    const int pw = pattern_w;
+    int ty = (py - origin_y) % pattern_h;
+    int tx = (x0 - origin_x) % pw;
+
+    if (ty < 0)
+        ty += pattern_h;
+    if (tx < 0)
+        tx += pw;
+
+    const uint8_t *const prow = &pattern_data[(size_t)ty * (size_t)pw];
+    const bool cached = pattern_data == pattern_cache;
+    const int first = n < pw ? n : pw;
+    const int k1 = first < pw - tx ? first : pw - tx;
+
+    /* One period, rotated to the span's phase: the tail of the pattern row
+     * from tx, then its head. */
+    if (cached) {
+        memcpy(dst, &prow[tx], (size_t)k1);
+        memcpy(&dst[k1], prow, (size_t)(first - k1));
+    } else {
+        copy_from_psram(dst, &prow[tx], (size_t)k1);
+        copy_from_psram(&dst[k1], prow, (size_t)(first - k1));
+    }
+    if (colour != 0xFFu)
+        for (int i = 0; i < first; i++)
+            dst[i] &= colour;
+
+    /* Grow to a word-multiple period, then double. Each copy is from the
+     * start of the span to a whole number of periods along it, so the
+     * phase is right, and source and destination never overlap. */
+    const int p4 = (pw & 1) ? pw * 4 : (pw & 2) ? pw * 2 : pw;
+    int done = first;
+
+    while (done < n && done < p4) {
+        const int c = (n < p4 ? n : p4) - done < done ?
+            (n < p4 ? n : p4) - done : done;
+
+        memcpy(&dst[done], dst, (size_t)c);
+        done += c;
+    }
+    while (done < n) {
+        const int c = n - done < done ? n - done : done;
+
+        memcpy(&dst[done], dst, (size_t)c);
+        done += c;
+    }
+}
+
 static void paint_span(int py, int x0, int x1, uint8_t colour, const uint8_t *src)
 {
+    /* A constant colour: the common case -- every fill, Bar, hline and
+     * FFill -- and the one where the row is periodic. Compose the patterned
+     * colour straight into the framebuffer row, apply the mix mode against
+     * the graphics plane a chunk at a time, and write the shadow once. */
+    if (src == NULL) {
+        uint8_t *const line = &video_framebuffer[py][x0];
+        const int n = x1 - x0;
+
+        if (pattern_on)
+            pattern_row(line, n, py, x0, colour);
+        else
+            memset(line, colour, (size_t)n);
+        if (logic_mode != LOGIC_NORMAL) {
+            const uint8_t *const sbase = gfx_shadow_base();
+
+            if (sbase != NULL && shadow_row_real[py]) {
+                const uint8_t *const srow = &sbase[(size_t)py * FB_WIDTH];
+                uint8_t base[PAINT_CHUNK];
+
+                for (int a = 0; a < n; a += PAINT_CHUNK) {
+                    const int k = n - a < PAINT_CHUNK ? n - a : PAINT_CHUNK;
+
+                    copy_from_psram(base, &srow[x0 + a], (size_t)k);
+                    mix_into(&line[a], base, k);
+                }
+            } else {
+                mix_uniform(line, shadow_uniform_colour, n);
+            }
+        }
+
+        uint8_t *const srow = shadow_row_for_write(py, x0, x1);
+
+        if (srow != NULL)
+            copy_to_psram(&srow[x0], line, (size_t)n);
+        return;
+    }
+
+    /* A PutBlk source row: not periodic, so composed as it comes. */
     uint8_t *const line = &video_framebuffer[py][0];
     const uint8_t *const sbase = gfx_shadow_base();
     const uint8_t *const srow_ro = (sbase != NULL && shadow_row_real[py]) ?
@@ -1702,6 +1823,89 @@ static inline uint32_t span_pack(int y, int x1, int x2)
     return ((uint32_t)y << 20) | ((uint32_t)x1 << 10) | (uint32_t)x2;
 }
 
+/* THE REGION SEARCH, A WORD AT A TIME. Finding the region is most of a flood
+ * fill that is not patterned: every pixel is compared about three times (its
+ * own row's extent, then the row above and the row below looking for seeds),
+ * and done a byte at a time that measured ~24 ms of a 35 ms full-panel fill.
+ * These answer the same three questions from four bytes at once. XOR with
+ * the target repeated in each byte turns "equals the target" into "is a zero
+ * byte"; pixel 0 is the lowest address and so the least significant byte on
+ * this part, which is why the forward searches count TRAILING zeros. The
+ * answers are exactly those of the byte loops they replace -- the usim oracle
+ * runs the old fill beside this one and demands the same pixels. */
+static inline uint32_t fb_word(const uint8_t *p)
+{
+    uint32_t w;
+
+    memcpy(&w, __builtin_assume_aligned(p, 4), 4);
+    return w;
+}
+
+/* First j in [i, end) whose pixel is NOT t, else end. */
+static int run_end(const uint8_t *r, int i, int end, uint8_t t)
+{
+    const uint32_t tw = (uint32_t)t * 0x01010101u;
+
+    for (; i < end && (i & 3) != 0; i++)
+        if (r[i] != t)
+            return i;
+    for (; i + 4 <= end; i += 4) {
+        const uint32_t d = fb_word(&r[i]) ^ tw;
+
+        if (d != 0u)
+            return i + (__builtin_ctz(d) >> 3);
+    }
+    for (; i < end; i++)
+        if (r[i] != t)
+            return i;
+    return end;
+}
+
+/* First j in [i, end) whose pixel IS t, else end. A zero byte of d is a
+ * match; the borrow trick below can flag a byte ABOVE a true zero falsely,
+ * never one below it, so the lowest flag is exact. */
+static int run_find(const uint8_t *r, int i, int end, uint8_t t)
+{
+    const uint32_t tw = (uint32_t)t * 0x01010101u;
+
+    for (; i < end && (i & 3) != 0; i++)
+        if (r[i] == t)
+            return i;
+    for (; i + 4 <= end; i += 4) {
+        const uint32_t d = fb_word(&r[i]) ^ tw;
+        const uint32_t z = (d - 0x01010101u) & ~d & 0x80808080u;
+
+        if (z != 0u)
+            return i + (__builtin_ctz(z) >> 3);
+    }
+    for (; i < end; i++)
+        if (r[i] == t)
+            return i;
+    return end;
+}
+
+/* Smallest j >= lo with every pixel in [j, i) equal to t: the run's start,
+ * searching LEFT from i. The first mismatch going left is the highest one in
+ * a word, hence leading zeros. */
+static int run_start(const uint8_t *r, int i, int lo, uint8_t t)
+{
+    const uint32_t tw = (uint32_t)t * 0x01010101u;
+
+    for (; i > lo && (i & 3) != 0; i--)
+        if (r[i - 1] != t)
+            return i;
+    for (; i - 4 >= lo; i -= 4) {
+        const uint32_t d = fb_word(&r[i - 4]) ^ tw;
+
+        if (d != 0u)
+            return i - (__builtin_clz(d) >> 3);
+    }
+    for (; i > lo; i--)
+        if (r[i - 1] != t)
+            return i;
+    return lo;
+}
+
 static inline void fill_span_abs(int px0, int px1, int py, uint8_t colour)
 {
     /* The plain case only: vidterm_flood_fill() routes patterned and
@@ -1759,11 +1963,8 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
         if (video_framebuffer[py][px] != target)
             continue;
 
-        int x1 = px, x2 = px;
-        while (x1 > clip_x0 && video_framebuffer[py][x1 - 1] == target)
-            x1--;
-        while (x2 < clip_x1 - 1 && video_framebuffer[py][x2 + 1] == target)
-            x2++;
+        const int x1 = run_start(video_framebuffer[py], px, clip_x0, target);
+        const int x2 = run_end(video_framebuffer[py], px, clip_x1, target) - 1;
 
         if (plain) {
             fill_span_abs(x1, x2 + 1, py, colour);
@@ -1786,12 +1987,13 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
         for (int ny = py - 1; ny <= py + 1; ny += 2) {
             if (ny < clip_y0 || ny >= clip_y1)
                 continue;
+            const uint8_t *const nrow = video_framebuffer[ny];
             int i = x1;
-            while (i <= x2) {
-                if (video_framebuffer[ny][i] != target) {
-                    i++;
-                    continue;
-                }
+
+            for (;;) {
+                i = run_find(nrow, i, x2 + 1, target);
+                if (i > x2)
+                    break;
                 if (sp < FILL_STACK_MAX) {
                     fill_stack[sp].x = (int16_t)i;
                     fill_stack[sp].y = (int16_t)ny;
@@ -1799,8 +2001,7 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
                 } else {
                     fill_overflows++;
                 }
-                while (i <= x2 && video_framebuffer[ny][i] == target)
-                    i++;
+                i = run_end(nrow, i, x2 + 1, target);
             }
         }
     }

@@ -510,7 +510,7 @@ test_blit_timing(void)
 			    (unsigned long)(flat1 - flat0));
 			result("patterned FFill, full panel", false, d);
 		} else {
-			timed("patterned FFill, full panel", fus, 150000u);
+			timed("patterned FFill, full panel", fus, 34000u);
 		}
 
 		/* ATTRIBUTION. The patterned FFill above measured 65.5 ms after
@@ -525,7 +525,11 @@ test_blit_timing(void)
 		 * span writer alone, with no search. If they do not roughly add
 		 * up to the patterned FFill, something else is going on.
 		 *
-		 * Budgets are placeholders until a first measurement exists. */
+		 * They did: 65.1 = ~25 (search) + ~40 (painting). Budgets are
+		 * about 1.5x the figures after the search went word-wise and a
+		 * patterned span became one period copied along the row (22.5,
+		 * 19.7 and 12.5 ms on 2026-09-26), so a regression towards either
+		 * old cost fails rather than passing inside a loose budget. */
 		vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00u);
 		uint32_t t1 = time_us_32();
 		vidterm_flood_fill(10, 10, 0xFFu);
@@ -535,7 +539,7 @@ test_blit_timing(void)
 			result("FFill, full panel, plain", false,
 			    "did not fill the panel - timing meaningless");
 		else
-			timed("FFill, full panel, plain", plain_us, 60000u);
+			timed("FFill, full panel, plain", plain_us, 30000u);
 
 		vidterm_buf_define(G, ID, 4u);
 		vidterm_buf_shape(G, ID, 2u, 2u);
@@ -553,7 +557,7 @@ test_blit_timing(void)
 			result("patterned Bar, full panel", false,
 			    "pattern not applied - timing meaningless");
 		else
-			timed("patterned Bar, full panel", bar_us, 60000u);
+			timed("patterned Bar, full panel", bar_us, 19000u);
 	}
 }
 
