@@ -244,6 +244,35 @@ timed(const char *name, uint32_t us, uint32_t budget_us)
  * set well above the measured figure -- this is a regression guard against
  * something going back to a byte at a time, not a benchmark to tune against.
  */
+/* Time one full text refresh, and PROVE it blitted every cell. vidterm_clear()
+ * paints the panel itself and leaves nothing dirty for a blank opaque glyph, so
+ * a refresh after it can legitimately do nothing -- and would then report a
+ * superb time for no work. The blitter counts the cells it draws, so the
+ * refresh is only believed if that count moved by exactly one screen. */
+static void
+timed_refresh(const char *name, uint32_t budget_us)
+{
+	uint32_t before, after, worst;
+
+	vidterm_blit_stats(&before, &worst);
+	const uint32_t t0 = time_us_32();
+	vidterm_refresh();
+	const uint32_t us = time_us_32() - t0;
+	vidterm_blit_stats(&after, &worst);
+
+	if (after - before != (uint32_t)(TEXT_COLS * TEXT_ROWS)) {
+		char d[80];
+
+		snprintf(d, sizeof(d), "blitted %lu cells, not %u - not a"
+		    " full refresh, timing meaningless",
+		    (unsigned long)(after - before),
+		    (unsigned)(TEXT_COLS * TEXT_ROWS));
+		result(name, false, d);
+		return;
+	}
+	timed(name, us, budget_us);
+}
+
 static void
 test_blit_timing(void)
 {
@@ -274,12 +303,43 @@ test_blit_timing(void)
 	vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT / 2, 0x12u);
 	timed("half-panel bar (per row)", time_us_32() - t0, 20000u);
 
-	/* A full text refresh: 3840 cells, the case VID-024 was about. The
-	 * clear is what dirties every cell; it is outside the timing. */
-	(void)vidterm_clear(' ', 0x01u);
-	t0 = time_us_32();
-	vidterm_refresh();
-	timed("full text refresh", time_us_32() - t0, 40000u);
+	/* FULL TEXT REFRESHES, three ways, because one figure hid the cause.
+	 *
+	 * A single "full text refresh" measured 33 ms on one run and 24 ms on
+	 * the next, and those runs differed in how much of the graphics shadow
+	 * was real (the fill before it had materialised all of it, then half)
+	 * -- so the figure mixed the blitter's own cost with its PSRAM reads
+	 * and could not say which dominated. It also did not move at all when
+	 * the C library's byte-wise memcpy was replaced, which says the cell
+	 * copy never went through memcpy and the cost is elsewhere.
+	 *
+	 * So separate the three things a cell can cost:
+	 *   opaque                 -- the glyph and its background only;
+	 *   transparent, implicit  -- plus restoring a background that is one
+	 *                             uniform colour (no PSRAM);
+	 *   transparent, resident  -- plus reading that background from a
+	 *                             real shadow row in PSRAM.
+	 * The differences between them attribute the cost; the first is the
+	 * floor any faster blitter has to beat. 'M' rather than a space, so
+	 * the glyph path actually draws pixels. The console is transparent by
+	 * default, so the last two are what an ordinary screen of text pays.
+	 *
+	 * Budgets are deliberately loose for now: they exist to catch a
+	 * regression once a baseline is known, and there is not one yet. */
+	vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00u);	/* implicit */
+	(void)vidterm_clear('M', 0x00u);
+	timed_refresh("text refresh, opaque", 40000u);
+
+	(void)vidterm_clear('M', 0x01u);
+	timed_refresh("text refresh, transp, implicit", 40000u);
+
+	/* Two part-height bars make every shadow row real: a single
+	 * full-panel fill would take the shortcut and leave them implicit. */
+	vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT / 2, 0x12u);
+	vidterm_fill_rect(0, FB_HEIGHT / 2, FB_WIDTH, FB_HEIGHT - FB_HEIGHT / 2,
+	    0x12u);
+	(void)vidterm_clear('M', 0x01u);
+	timed_refresh("text refresh, transp, resident", 60000u);
 
 	/* Forty 32x32 stamps -- the wgfx gem scene. Before the row rewrite
 	 * this was about 300 us a stamp, 12 ms for the forty, because every
