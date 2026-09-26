@@ -82,21 +82,86 @@ enum : uint8_t {
 	MOUSE_BTN_L = 0x01, MOUSE_BTN_R = 0x02, MOUSE_BTN_M = 0x04,
 };
 
-static void
+/* Keystrokes feed the guest console as plain bytes. */
+static inline void
 emit_key(uint8_t c)
 {
-	/* Keystrokes feed the guest console as plain bytes; the echo is a
-	 * bring-up aid. */
 	vid_link_input(c);
+}
+
+/* THE KEYBOARD ECHO (`verbose`): one line per event, saying what arrived and
+ * what the 6809 was sent for it -- the HID usage (the USB "scancode"), the
+ * modifiers held, and the byte, or why there was none. Releases, modifier-only
+ * changes and rollover reports are echoed too, because "I pressed a key and
+ * nothing happened" has several causes and the line should name which. */
 #if USB_HOST_ECHO
+static const char *
+mod_text(uint8_t mod, char *buf, size_t n)
+{
+	static const char *const name[8] = {
+		"LCtrl", "LShift", "LAlt", "LGUI",
+		"RCtrl", "RShift", "RAlt", "RGUI",
+	};
+	size_t at = 0;
+
+	buf[0] = '\0';
+	for (int b = 0; b < 8; b++)
+		if ((mod & (1u << b)) != 0u && at < n)
+			at += (size_t)snprintf(&buf[at], n - at, "%s%s",
+			    at != 0 ? "+" : "", name[b]);
+	if (at == 0)
+		snprintf(buf, n, "-");
+	return buf;
+}
+
+/* What the 6809 is sent, as a person would name it. */
+static const char *
+byte_text(uint8_t c, char *buf, size_t n)
+{
+	if (c >= KEY_FN_BASE && c <= KEY_FN_BASE + 11u)
+		snprintf(buf, n, "F%u", (unsigned)(c - KEY_FN_BASE + 1u));
+	else if (c == 0x0D)
+		snprintf(buf, n, "CR");
+	else if (c == 0x08)
+		snprintf(buf, n, "BS");
+	else if (c == 0x09)
+		snprintf(buf, n, "TAB");
+	else if (c == 0x1B)
+		snprintf(buf, n, "ESC");
+	else if (c < 0x20)
+		snprintf(buf, n, "^%c", (char)(c + 0x40));
+	else if (c == 0x7F)
+		snprintf(buf, n, "DEL");
+	else if (c == 0x9C)
+		snprintf(buf, n, "pound (CP437)");
+	else if (c == 0xAA)
+		snprintf(buf, n, "not (CP437)");
+	else if (c < 0x7F)
+		snprintf(buf, n, "'%c'", (char)c);
+	else
+		snprintf(buf, n, "-");
+	return buf;
+}
+
+/* `sent` is the byte sent, or -1 with `why` saying why nothing was. */
+static void
+echo_key(const char *event, uint8_t kc, uint8_t mod, int sent, const char *why)
+{
+	char m[64], b[24];
+
 	if (!echo_enabled)
 		return;
-	if (c >= ' ' && c < 0x7F)
-		printf("KEY '%c' (0x%02X)\n", (char)c, c);
+	if (sent >= 0)
+		printf("KEY %-4s usage 0x%02X  mod 0x%02X %-14s -> 0x%02X %s\n",
+		    event, kc, mod, mod_text(mod, m, sizeof(m)), (unsigned)sent,
+		    byte_text((uint8_t)sent, b, sizeof(b)));
 	else
-		printf("KEY 0x%02X\n", c);
-#endif
+		printf("KEY %-4s usage 0x%02X  mod 0x%02X %-14s -> nothing: %s\n",
+		    event, kc, mod, mod_text(mod, m, sizeof(m)), why);
 }
+#else
+#define echo_key(event, kc, mod, sent, why)	((void)0)
+#endif
 
 /* ======================================================================== *
  *  Keyboard cooking -- UK layout, HID usage -> final character.
@@ -238,9 +303,40 @@ hid_cook_keyboard(const uint8_t *report, unsigned len)
 	 * pressed and typed each of them again. Ignore it whole; the next real
 	 * report carries on from the last real one. */
 	for (int i = 0; i < 6; i++)
-		if (keys[i] >= 0x01u && keys[i] <= 0x03u)
+		if (keys[i] >= 0x01u && keys[i] <= 0x03u) {
+#if USB_HOST_ECHO
+			if (echo_enabled)
+				printf("KEY error usage 0x%02X (%s) -> report"
+				    " ignored, held keys unchanged\n", keys[i],
+				    keys[i] == 0x01u ? "rollover: too many keys" :
+				    keys[i] == 0x02u ? "POST fail" : "undefined");
+#endif
 			return;
+		}
 
+#if USB_HOST_ECHO
+	/* Releases, and modifiers changing on their own: nothing is sent for
+	 * either, but both change what the next key or repeat will produce. */
+	if (echo_enabled) {
+		for (int i = 0; i < 6; i++) {
+			const uint8_t kc = kbd_prev[i];
+			bool still = false;
+
+			if (kc == 0)
+				continue;
+			for (int j = 0; j < 6; j++)
+				still = still || keys[j] == kc;
+			if (!still)
+				printf("KEY up   usage 0x%02X\n", kc);
+		}
+		if (mod != rpt_mod) {
+			char m[64];
+
+			printf("KEY mods now 0x%02X %s\n", mod,
+			    mod_text(mod, m, sizeof(m)));
+		}
+	}
+#endif
 	rpt_mod = mod;
 
 	for (int i = 0; i < 6; i++) {
@@ -255,13 +351,19 @@ hid_cook_keyboard(const uint8_t *report, unsigned len)
 
 		if (kc == KEY_CAPS_LOCK) {
 			caps_lock = !caps_lock;	/* toggle on press */
+			echo_key("down", kc, mod, -1,
+			    caps_lock ? "Caps Lock now ON" : "Caps Lock now OFF");
 			continue;
 		}
 
 		const uint8_t c = cook_key(kc, mod);
 
-		if (c != 0)
+		if (c != 0) {
 			emit_key(c);
+			echo_key("down", kc, mod, c, nullptr);
+		} else {
+			echo_key("down", kc, mod, -1, "no mapping for this key");
+		}
 		if (repeats(c)) {
 			rpt_key = kc;
 			rpt_armed = false;	/* the next tick starts the delay */
@@ -300,8 +402,10 @@ hid_cook_tick(uint32_t now_ms)
 
 	const uint8_t c = cook_key(rpt_key, rpt_mod);
 
-	if (repeats(c))
+	if (repeats(c)) {
 		emit_key(c);
+		echo_key("rpt", rpt_key, rpt_mod, c, nullptr);
+	}
 	/* From NOW, not from when it was due: a repeat held back by a slow
 	 * guest must not be followed by a burst catching up. */
 	rpt_due = now_ms + KEY_REPEAT_INTERVAL_MS;
