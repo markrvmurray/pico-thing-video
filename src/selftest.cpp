@@ -254,10 +254,25 @@ test_blit_timing(void)
 	vidterm_set_origin(0, 0);
 	vidterm_set_clip(0, 0, FB_WIDTH, FB_HEIGHT);
 
-	/* A full-screen fill: the large contiguous case. */
+	/* A full-panel fill. Now nearly free: the whole panel makes the
+	 * graphics shadow uniform by definition, so it is a framebuffer memset
+	 * and one flag rather than ~960 KB across the QMI. It measured
+	 * 24,148 us before that was fixed, against a budget of 25,000 -- which
+	 * is how narrowly something costing a frame and a half passed for
+	 * healthy, and the reason this budget is now tight enough to bite. */
 	t0 = time_us_32();
 	vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0x00u);
-	timed("full-screen fill", time_us_32() - t0, 25000u);
+	timed("full-panel fill", time_us_32() - t0, 5000u);
+
+	/* A full-WIDTH, part-height bar still goes per row, so it still pays
+	 * the shadow twice a row: once to materialise it, once to fill it.
+	 * Timed separately because it is the case the panel-wide shortcut
+	 * cannot help, and therefore the one that would benefit from a
+	 * per-row uniform colour. Keeping it here stops the cheap path from
+	 * being mistaken for a general fix. */
+	t0 = time_us_32();
+	vidterm_fill_rect(0, 0, FB_WIDTH, FB_HEIGHT / 2, 0x12u);
+	timed("half-panel bar (per row)", time_us_32() - t0, 20000u);
 
 	/* A full text refresh: 3840 cells, the case VID-024 was about. The
 	 * clear is what dirties every cell; it is outside the timing. */
@@ -268,7 +283,7 @@ test_blit_timing(void)
 
 	/* Forty 32x32 stamps -- the wgfx gem scene. Before the row rewrite
 	 * this was about 300 us a stamp, 12 ms for the forty, because every
-	 * pixel was two QSPI transactions.
+	 * pixel was two QSPI transactions; measured 4240 us afterwards.
 	 *
 	 * A REAL buffer, and the result is CHECKED. An earlier draft of this
 	 * passed a buffer id that does not exist, so gfx_find returned NULL,
@@ -294,22 +309,33 @@ test_blit_timing(void)
 		return;
 	}
 
-	t0 = time_us_32();
-	for (int i = 0; i < 40; i++)
-		vidterm_buf_put(G, ID, 40 + (i % 10) * 96,
-		    60 + (i / 10) * 100);
-	const uint32_t us = time_us_32() - t0;
+	/* TWICE, and the two passes measure different things. The first runs
+	 * over a shadow whose rows are all implicit, so it pays to materialise
+	 * each row it touches -- a 1 KB PSRAM write per row, once. The second
+	 * finds them real and measures stamping alone. Reporting one figure
+	 * would have hidden whichever cost grew, and the split matters because
+	 * the panel-wide fill above now deliberately leaves every row
+	 * implicit: a guest that clears and then draws pays the first figure,
+	 * which is the honest one to quote for wgfx. */
+	for (int pass = 0; pass < 2; pass++) {
+		t0 = time_us_32();
+		for (int i = 0; i < 40; i++)
+			vidterm_buf_put(G, ID, 40 + (i % 10) * 96,
+			    60 + (i / 10) * 100);
+		const uint32_t us = time_us_32() - t0;
 
-	/* Did it actually draw? Check the last stamp's corners, so a stamp
-	 * that landed but was clipped to nothing cannot pass either. */
-	const bool drew = video_framebuffer[360][904] == MARK &&
-	    video_framebuffer[391][935] == MARK;
-
-	if (!drew)
-		result("40 block stamps", false,
-		    "stamps did not appear - timing is meaningless");
-	else
-		timed("40 block stamps (32x32)", us, 8000u);
+		/* Did it actually draw? The last stamp's corners, so a stamp
+		 * that landed but was clipped to nothing cannot pass either. */
+		if (video_framebuffer[360][904] != MARK ||
+		    video_framebuffer[391][935] != MARK) {
+			result("40 block stamps", false,
+			    "stamps did not appear - timing is meaningless");
+			break;
+		}
+		timed(pass == 0 ? "40 stamps, shadow implicit" :
+		    "40 stamps, shadow resident", us, pass == 0 ? 20000u :
+		    8000u);
+	}
 	vidterm_buf_kill(G, ID);
 }
 

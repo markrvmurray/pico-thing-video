@@ -896,6 +896,34 @@ void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour)
 
     fill_patterned = pattern_on;
 
+    /* THE WHOLE PANEL makes the shadow uniform by definition, so it needs no
+     * shadow traffic at all -- just a new uniform colour and every row marked
+     * not-real. That is the entire point of keeping the plane implicit, and
+     * this path was missing it: shadow_fill_span() per row materialised each
+     * row with a 1024-byte PSRAM memset and then filled it with another, so a
+     * full-screen fill moved nearly a MEGABYTE across the QMI to reach a
+     * state describable by one byte and a flag.
+     *
+     * Measured on hardware before this: 24,148 us for a full-screen fill,
+     * which is one and a half frames, on the core that owes the overlay
+     * service its deadline. The self-test found it -- the budget it passed
+     * against was 25,000 us, which is how narrowly a figure that large
+     * escaped notice.
+     *
+     * It must be the whole panel and not merely full width: a full-width bar
+     * of partial height leaves the rows above and below it holding something
+     * else, and there is no per-row uniform colour to express that. (There
+     * could be, at one byte a row -- see the fill below, which is the case
+     * that would benefit.) */
+    if (px0 == 0 && px1 == FB_WIDTH && py0 == 0 && py1 == FB_HEIGHT &&
+        logic_mode == LOGIC_NORMAL && !fill_patterned) {
+        memset(&video_framebuffer[0][0], colour,
+               (size_t)FB_WIDTH * (size_t)FB_HEIGHT);
+        vidterm_shadow_reset(colour);
+        fill_patterned = false;
+        return;
+    }
+
     /* Full-width spans are contiguous in the framebuffer, so the whole
      * rectangle is one run of memory rather than one per row. A cleared
      * screen or a full-width bar is the common large fill, and it is the
