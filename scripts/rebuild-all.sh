@@ -49,6 +49,18 @@ JOBS="${JOBS:-8}"
 fail=0
 start=$(date +%s)
 
+# iCloud CONFLICT COPIES. ~/Documents is iCloud-synced, so every rebuild's
+# churn leaves "name 2", "name 12.d" and so on in the build trees -- 1,643 of
+# them across these trees when first counted (2026-09-26), 822 in one. A clean
+# rebuild does not remove them, since they are not names the build knows.
+# Mark's standing rule is to delete them; this sweeps ONLY the trees this
+# script owns. His cmake-build-* trees are not touched, and .git is handled
+# separately (see the project memory), because a duplicate there can be a ref.
+for t in $FW_TREES build-tests; do
+	[ -d "$t" ] && find "$t" \( -name '* [0-9]' -o -name '* [0-9].*' \) \
+	    -prune -exec rm -rf {} + 2>/dev/null
+done
+
 note() { printf '%-34s %s\n' "$1" "$2"; }
 
 # --- firmware, every tree, every toolchain ---------------------------------
