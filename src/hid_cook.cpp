@@ -68,15 +68,40 @@ enum : uint8_t {
 	KEY_EUROPE_2 = 0x64,
 };
 
-/* The arrows send the OS-9 cursor bytes: up $0C, down $0A, left $08, right
- * $09. That is the convention the guest's own tools already read (ded, and
- * the Wildbits PS/2 driver, which faces the same PC keyboard), so a program
- * written for a CoCo keyboard works unchanged. Its price is inherent: left is
- * Backspace's byte and right is Tab's, and the guest cannot tell them apart.
- * Modifiers do not change them, as in that driver. */
-enum : uint8_t {
-	OS9_UP = 0x0C, OS9_DOWN = 0x0A, OS9_LEFT = 0x08, OS9_RIGHT = 0x09,
+/* The arrows send the CoCo keyboard's bytes, taken from the driver OS-9
+ * software was written against -- level1/modules/vtio.asm, KeyTbl, whose
+ * three columns are plain, Shift and Ctrl:
+ *
+ *          plain  Shift  Ctrl
+ *   up      $0C    $1C    $13
+ *   down    $0A    $1A    $12
+ *   left    $08    $18    $10
+ *   right   $09    $19    $11
+ *
+ * The modified columns MATTER: minted pages with Shift+Up/Down, deletes with
+ * Shift+Left/Right and goes to line start/end with Ctrl+Left/Right. A first
+ * version followed the Wildbits PS/2 driver and ignored modifiers, which left
+ * all six unreachable except as raw control codes nobody would guess. vtio
+ * tests Shift first, so with both held Shift wins; so does this.
+ *
+ * The collisions come with the convention and are the same on a real CoCo3:
+ * plain left is Backspace's byte and right is Tab's; Ctrl+Up is XOFF and
+ * Ctrl+Right XON (the video console does no flow control); Shift+Left is
+ * SCF's line-kill, so at a shell prompt it erases the line, as on a CoCo. */
+enum { ARROW_UP, ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT };
+
+static const uint8_t arrow_bytes[4][3] = {
+	{ 0x0C, 0x1C, 0x13 },	/* up */
+	{ 0x0A, 0x1A, 0x12 },	/* down */
+	{ 0x08, 0x18, 0x10 },	/* left */
+	{ 0x09, 0x19, 0x11 },	/* right */
 };
+
+static inline uint8_t
+arrow(int dir, bool shift, bool ctrl)
+{
+	return arrow_bytes[dir][shift ? 1 : ctrl ? 2 : 0];
+}
 
 /* The function keys reach the guest as $80-$8B, one per key, F1 first.
  *
@@ -187,7 +212,7 @@ echo_key(const char *event, uint8_t kc, uint8_t mod, int sent, const char *why)
  *  £ = 0x9C, ¬ = 0xAA.
  * ======================================================================== */
 static uint8_t
-uk_cook(uint8_t kc, bool shift, bool caps, bool num)
+uk_cook(uint8_t kc, bool shift, bool ctrl, bool caps, bool num)
 {
 	/* The numeric keypad. With Num Lock on it types the same bytes as the
 	 * main keys; off, its 8/2/4/6 are the arrows, as on a PC. Its editing
@@ -200,10 +225,10 @@ uk_cook(uint8_t kc, bool shift, bool caps, bool num)
 		if (num)
 			return (uint8_t)numeric[kc - KEY_KP_1];
 		switch (kc) {
-		case KEY_KP_8: return OS9_UP;
-		case KEY_KP_2: return OS9_DOWN;
-		case KEY_KP_4: return OS9_LEFT;
-		case KEY_KP_6: return OS9_RIGHT;
+		case KEY_KP_8: return arrow(ARROW_UP, shift, ctrl);
+		case KEY_KP_2: return arrow(ARROW_DOWN, shift, ctrl);
+		case KEY_KP_4: return arrow(ARROW_LEFT, shift, ctrl);
+		case KEY_KP_6: return arrow(ARROW_RIGHT, shift, ctrl);
 		default:       return 0;
 		}
 	}
@@ -231,10 +256,10 @@ uk_cook(uint8_t kc, bool shift, bool caps, bool num)
 	case KEY_F1 + 8: case KEY_F1 + 9: case KEY_F1 + 10: case KEY_F12:
 		return (uint8_t)(KEY_FN_BASE + (kc - KEY_F1));
 
-	case KEY_UP:            return OS9_UP;
-	case KEY_DOWN:          return OS9_DOWN;
-	case KEY_LEFT:          return OS9_LEFT;
-	case KEY_RIGHT:         return OS9_RIGHT;
+	case KEY_UP:            return arrow(ARROW_UP, shift, ctrl);
+	case KEY_DOWN:          return arrow(ARROW_DOWN, shift, ctrl);
+	case KEY_LEFT:          return arrow(ARROW_LEFT, shift, ctrl);
+	case KEY_RIGHT:         return arrow(ARROW_RIGHT, shift, ctrl);
 
 	case KEY_KP_SLASH:      return '/';
 	case KEY_KP_STAR:       return '*';
@@ -310,7 +335,7 @@ cook_key(uint8_t kc, uint8_t mod)
 {
 	const bool shift = (mod & (MOD_LEFTSHIFT | MOD_RIGHTSHIFT)) != 0;
 	const bool ctrl  = (mod & (MOD_LEFTCTRL  | MOD_RIGHTCTRL))  != 0;
-	uint8_t c = uk_cook(kc, shift, caps_lock, num_lock);
+	uint8_t c = uk_cook(kc, shift, ctrl, caps_lock, num_lock);
 
 	if (ctrl && c != 0) {
 		uint8_t u = (c >= 'a' && c <= 'z') ? (uint8_t)(c - 0x20) : c;
