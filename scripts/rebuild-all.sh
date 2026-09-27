@@ -71,9 +71,31 @@ note() { printf '%-34s %s\n' "$1" "$2"; }
 # clang image that actually gets flashed: the hot blitter's O3 attribute
 # is gcc-only by construction, so the two compilers genuinely differ on
 # the hot path.
+# A TREE IS WHAT ITS NAME SAYS, OR THE RUN FAILS. The *atfe trees exist to
+# build what Mark flashes, with ATfE's clang; every other tree is gcc. On
+# 2026-09-27 both ATfE trees were reconfigured with gcc by accident (a zsh
+# variable holding two -D options did not word-split, so PICO_COMPILER never
+# reached CMake) and this script reported them green -- a clean gcc build,
+# saying nothing about the image that goes on the board. So the compiler each
+# tree was CONFIGURED with is checked against its name before anything builds.
+tree_compiler_ok() {
+	cc=$(sed -n 's/^CMAKE_C_COMPILER:[A-Z]*=//p' "$1/CMakeCache.txt" 2>/dev/null)
+	case "$1" in
+	*atfe*) case "$cc" in */ATfE*/clang) return 0 ;; esac ;;
+	*)      case "$cc" in *arm-none-eabi-gcc) return 0 ;; esac ;;
+	esac
+	printf '%s is configured with "%s", which its name forbids\n' "$1" "$cc"
+	return 1
+}
+
 for t in $FW_TREES; do
 	if [ ! -d "$t" ]; then
 		note "$t" "ABSENT - skipped"
+		continue
+	fi
+	if ! tree_compiler_ok "$t"; then
+		note "$t" "WRONG COMPILER - not built"
+		fail=1
 		continue
 	fi
 	if cmake --build "$t" -j"$JOBS" --clean-first >/tmp/rb.$$.log 2>&1; then
