@@ -600,8 +600,13 @@ blit_char_cell(int col, int row, const uint8_t *sbase)
      * out at 73 ns a byte -- slower even than a plain byte loop. Now each row
      * is at most two 32-bit shadow reads, one table lookup per half and two
      * word stores. */
+    /* Inverse video inverts the MASK: the cell becomes foreground and the
+     * glyph shows the background -- its colour, or the graphics plane -- so
+     * reverse video is exact over drawing too. */
+    const uint8_t flip = (attr & VIDTERM_ATTR_INVERSE) != 0 ? 0xFF : 0x00;
+
     for (int gy = 0; gy < CHAR_H; gy++) {
-        const uint8_t mask = font_row(ch, gy);
+        const uint8_t mask = (uint8_t)(font_row(ch, gy) ^ flip);
         uint8_t *line = &video_framebuffer[y + gy][x];
         uint32_t b0, b1;
 
@@ -671,7 +676,7 @@ static void
 blit_cell_run(int row, int c0, uint32_t bits, const uint8_t *sbase)
 {
     uint32_t fgw[RUN_CELLS], bgw[RUN_CELLS];
-    uint8_t chs[RUN_CELLS];
+    uint8_t chs[RUN_CELLS], flips[RUN_CELLS];
     uint32_t transp = 0;
 
     /* Transparency first, alone: a run without any must not pay for
@@ -692,6 +697,7 @@ blit_cell_run(int row, int c0, uint32_t bits, const uint8_t *sbase)
         const uint8_t attr = text_attrs[row][c0 + i];
 
         chs[i] = text_cells[row][c0 + i];
+        flips[i] = (attr & VIDTERM_ATTR_INVERSE) != 0 ? 0xFF : 0x00;
         fgw[i] = (uint32_t)attr_to_fg(attr) * 0x01010101u;
         bgw[i] = (uint32_t)attr_to_bg(attr) * 0x01010101u;
     }
@@ -722,7 +728,7 @@ blit_cell_run(int row, int c0, uint32_t bits, const uint8_t *sbase)
 
         for (uint32_t b = bits; b != 0u; b &= b - 1u) {
             const int i = __builtin_ctz(b);
-            const uint8_t mask = font_row(chs[i], gy);
+            const uint8_t mask = (uint8_t)(font_row(chs[i], gy) ^ flips[i]);
             uint8_t *cell = &line[i * CHAR_W];
             uint32_t b0, b1;
 
@@ -929,7 +935,7 @@ bool vidterm_clear(uint8_t ch, uint8_t attr)
      * outranks the cores, where the blit touches eight bytes and skips a
      * row. Doing one is still far better than doing both, which is what a
      * clear used to do. */
-    if (glyph_is_blank(ch) && (attr & 0x01) == 0) {
+    if (glyph_is_blank(ch) && (attr & (0x01 | VIDTERM_ATTR_INVERSE)) == 0) {
         memset(video_framebuffer, attr_to_bg(attr),
                sizeof(video_framebuffer));
         memset(dirty_rows, 0, sizeof(dirty_rows));
@@ -978,6 +984,19 @@ void vidterm_scroll_region(int col, int row, int cols, int rows,
         mark_dirty_span(r, col, cols);
     }
     vidterm_clear_region(col, row + rows - 1, cols, 1, fill_ch, fill_attr);
+}
+
+void vidterm_scroll_region_down(int col, int row, int cols, int rows,
+                                uint8_t fill_ch, uint8_t fill_attr)
+{
+    if (cols <= 0 || rows <= 0)
+        return;
+    for (int r = row + rows - 1; r > row; r--) {
+        memmove(&text_cells[r][col], &text_cells[r - 1][col], (size_t)cols);
+        memmove(&text_attrs[r][col], &text_attrs[r - 1][col], (size_t)cols);
+        mark_dirty_span(r, col, cols);
+    }
+    vidterm_clear_region(col, row, cols, 1, fill_ch, fill_attr);
 }
 
 void vidterm_scroll_up(uint8_t fill_ch, uint8_t fill_attr)

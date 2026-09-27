@@ -40,7 +40,12 @@
  * glyph. Opaque black was hiding graphics, and doing it so thoroughly that a
  * correctly drawn box once looked like a broken feature. */
 #define CONSOLE_ATTR_BASE  0xE0u
-#define CONSOLE_ATTR       console_attr
+/* The attribute text is written with: the console's base, plus inverse when
+ * the TARGET window has it on ($1F $20) -- per window, as GrfDrv keeps it in
+ * its window table, and applying to erases as well as glyphs, since GrfDrv
+ * rewrites the window's default attribute. */
+#define CONSOLE_ATTR       ((uint8_t)(console_attr | \
+    (windows[win_target].inverse ? VIDTERM_ATTR_INVERSE : 0u)))
 
 /* Multi-byte control sequences ($02 x y cursor position, $05 arg cursor
  * on/off) collect their parameter bytes through this little machine. */
@@ -49,6 +54,7 @@ enum param_state {
 	ST_XY_COL,		/* $02 seen; next byte is column + $20 */
 	ST_XY_ROW,		/* column taken; next byte is row + $20 */
 	ST_CURSOR_ARG,		/* $05 seen; next byte is $20 off / $21 on */
+	ST_ATTR_ARG,		/* $1F seen; next byte is its sub-code */
 	ST_ESC_OP,		/* $1B seen; next byte is the sub-code */
 	ST_ESC_PARAM,		/* collecting a graphics command's params */
 	ST_ESC_SKIP		/* swallowing GPLoad's streamed payload */
@@ -163,6 +169,7 @@ struct window {
 	bool	protect;		/* false: graphics may leave the window */
 	int	cur_col, cur_row;	/* cursor WITHIN the window */
 	int	slot;			/* parked screen, or -1 for none */
+	bool	inverse;		/* $1F $20/$21: reverse video */
 };
 
 static struct window windows[WIN_MAX];
@@ -270,6 +277,42 @@ surface_scroll(void)
 
 static int  cur_col;
 static int  cur_row;
+
+/* Insert ($1F $30) or delete ($1F $31) a line at the cursor's row, within the
+ * target window only, leaving the cursor where it is. Insert moves the
+ * cursor's row and everything below it down one and loses the bottom row;
+ * delete moves the rows below up one and clears the bottom row. On the
+ * bottom row either one just clears it. */
+static void
+surface_line(bool insert)
+{
+	const int n = win_rows - cur_row;	/* rows from the cursor down */
+
+	if (n <= 0)
+		return;
+	if (target_is_visible()) {
+		if (insert)
+			vidterm_scroll_region_down(win_col0, win_row0 + cur_row,
+			    win_cols, n, ' ', CONSOLE_ATTR);
+		else
+			vidterm_scroll_region(win_col0, win_row0 + cur_row,
+			    win_cols, n, ' ', CONSOLE_ATTR);
+		return;
+	}
+	uint8_t *p = target_backing();
+	if (p == NULL)
+		return;
+	const size_t stride = (size_t)win_cols * 2u;
+	uint8_t *const at = p + (size_t)cur_row * stride;
+	if (insert)
+		memmove(at + stride, at, stride * (size_t)(n - 1));
+	else
+		memmove(at, at + stride, stride * (size_t)(n - 1));
+	const int blank = insert ? cur_row : win_rows - 1;
+	for (int c = 0; c < win_cols; c++)
+		put_cell(c, blank, ' ', CONSOLE_ATTR);
+}
+
 static bool cursor_shown = true;/* tracked; no visible cursor glyph yet */
 static bool claimed;		/* console has taken the screen */
 static bool dirty;		/* something rendered since last flush */
@@ -463,6 +506,7 @@ win_define(unsigned id, int x, int y, int cols, int rows)
 	w->wa_cols = cols;
 	w->wa_rows = rows;
 	w->protect = true;		/* windows contain their own drawing */
+	w->inverse = false;		/* a (re)defined window starts plain */
 	w->cur_col = 0;
 	w->cur_row = 0;
 }
@@ -840,6 +884,24 @@ vid_link_consume(uint8_t b)
 		cursor_shown = (b == 0x21u);	/* $20 off / $21 on */
 		state = ST_NORMAL;
 		return;
+	case ST_ATTR_ARG:
+		/* The CoCo3 $1F family (GrfDrv L1483): exactly two bytes,
+		 * $1F then a sub-code. An unknown sub-code is consumed and
+		 * does nothing, as GrfDrv simply returns -- it must never
+		 * desynchronise the stream. */
+		state = ST_NORMAL;
+		switch (b) {
+		case 0x20u: windows[win_target].inverse = true;  break;
+		case 0x21u: windows[win_target].inverse = false; break;
+		case 0x30u: surface_line(true);  break;	/* insert line */
+		case 0x31u: surface_line(false); break;	/* delete line */
+		/* $22/$23 underline and $24/$25 blink: accepted and
+		 * ignored. The attribute byte's one free bit went to
+		 * inverse, and a second attribute plane is 3,840 bytes
+		 * of SRAM the device build does not have. */
+		default: break;
+		}
+		return;
 	case ST_NORMAL:
 		break;
 	}
@@ -856,6 +918,9 @@ vid_link_consume(uint8_t b)
 		break;
 	case 0x1Bu:			/* graphics escape: sub-code follows */
 		state = ST_ESC_OP;
+		break;
+	case 0x1Fu:			/* text attribute / line op: sub-code */
+		state = ST_ATTR_ARG;
 		break;
 	case 0x03u:			/* erase line (cursor column keeps) */
 		erase_span(cur_row, 0, win_cols);
@@ -904,7 +969,7 @@ vid_link_consume(uint8_t b)
 				line_feed();
 			}
 		}
-		/* $0E-$1F: not in the set; ignored. */
+		/* $0E-$1A, $1C-$1E: not in the set; ignored. */
 		break;
 	}
 }
@@ -925,6 +990,7 @@ vid_link_consume_class(void)
 	case ST_XY_COL:
 	case ST_XY_ROW:
 	case ST_CURSOR_ARG:
+	case ST_ATTR_ARG:
 	case ST_ESC_PARAM:
 		return VID_BYTE_PARAM;
 	}
@@ -991,6 +1057,7 @@ vid_link_consume_reset(void)
 	windows[0].cur_col = 0;
 	windows[0].cur_row = 0;
 	windows[0].slot = -1;
+	windows[0].inverse = false;
 	win_shown = 0u;
 	win_adopt(0u);
 

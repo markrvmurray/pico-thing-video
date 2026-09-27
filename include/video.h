@@ -51,6 +51,15 @@ void video_demo(void);
 #endif
 
 /* ── Text layer ─────────────────────────────────────────────────────────── */
+/* A cell's ATTRIBUTE byte: bits 7-5 foreground R,G,B (full intensity), bits
+ * 3-1 background R,G,B (lower intensity), bit 0 transparent background
+ * (restore the graphics plane there), and bit 4 INVERSE -- the glyph's mask
+ * is inverted, so the cell is foreground and the glyph shows the background
+ * through it: true reverse video, over graphics as well. That was the last
+ * free bit; underline and blink have none (the grid is 3,840 bytes of SRAM
+ * per extra attribute byte, which the budget does not have). */
+#define VIDTERM_ATTR_INVERSE	0x10u
+
 void vidterm_putch(int col, int row, uint8_t ch, uint8_t attr);
 void vidterm_puts(int col, int row, const char *s, uint8_t attr);
 /* Returns TRUE if it painted the panel itself, in which case nothing is dirty
@@ -105,6 +114,10 @@ void vidterm_read_row(int col, int row, int cols, uint8_t *dst);
 void vidterm_write_row(int col, int row, int cols, const uint8_t *src);
 void vidterm_scroll_region(int col, int row, int cols, int rows,
                            uint8_t fill_ch, uint8_t fill_attr); /* text grid up one row */
+/* The rectangle DOWN one row: its bottom row is lost and its top row filled.
+ * Insert-line is this, from the cursor's row to the bottom of the window. */
+void vidterm_scroll_region_down(int col, int row, int cols, int rows,
+                                uint8_t fill_ch, uint8_t fill_attr);
 
 /* Text cursor. A blinking block, drawn by inverting the cell it sits on, so
  * the character underneath stays readable. It is composited during scan-out
