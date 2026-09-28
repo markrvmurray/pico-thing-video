@@ -1573,15 +1573,75 @@ static uint32_t isqrt32(uint32_t n)
 /* Midpoint ellipse, plotted in four-way symmetry. The two regions are where
  * the curve is shallower than 45 degrees and where it is steeper; splitting
  * them is what keeps the step decision a single comparison per pixel. */
-void vidterm_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
+/* ARC: an ellipse outline cut by a clip line, as CoCo3 GrfDrv draws it
+ * (level2/cmds/grfdrv.asm: L1860, and the per-point tests L1A9D-L1AF9, read
+ * from the code -- its comments on the vertical cases say the opposite).
+ * The clip line runs from (x1,y1) to (x2,y2), given as OFFSETS from the
+ * ellipse's centre, and a point at offset (dx,dy) is kept on one side of it:
+ *
+ *   vertical   (x1 == x2):  y1 <  y2 keeps dx >= x1;  otherwise dx <= x1
+ *   horizontal (y1 == y2):  x1 <  x2 keeps dy <= y1;  otherwise dy >= y1
+ *   diagonal:  (dx - x2)(y1 - y2) <= (dy - y2)(x1 - x2)
+ *
+ * A clip line that is a single point counts as vertical, as in GrfDrv. */
+struct arc_clip {
+    int x1, y1, x2, y2;
+};
+
+static bool arc_keeps(const struct arc_clip *a, int dx, int dy)
+{
+    if (a->x1 == a->x2)
+        return a->y1 < a->y2 ? dx >= a->x1 : dx <= a->x1;
+    if (a->y1 == a->y2)
+        return a->x1 < a->x2 ? dy <= a->y1 : dy >= a->y1;
+    return (long)(dx - a->x2) * (long)(a->y1 - a->y2) <=
+           (long)(dy - a->y2) * (long)(a->x1 - a->x2);
+}
+
+/* One outline point at offset (dx,dy) from the centre, through the arc's
+ * clip when there is one. */
+static inline void
+curve_point(int cx, int cy, int dx, int dy, uint8_t colour,
+            const struct arc_clip *arc)
+{
+    if (arc == NULL || arc_keeps(arc, dx, dy))
+        plot_unlocked(cx + dx, cy + dy, colour);
+}
+
+/* The four symmetric points of an outline -- each ONCE. Where x or y is 0
+ * two of the four are the same pixel, and plotting it twice is not
+ * harmless: in XOR mode, the rubber-banding case, the second plot undoes
+ * the first, and every circle and ellipse lost its top, bottom, left and
+ * right pixels. */
+static inline void
+curve_quad(int cx, int cy, int x, int y, uint8_t colour,
+           const struct arc_clip *arc)
+{
+    curve_point(cx, cy, x, y, colour, arc);
+    if (x != 0)
+        curve_point(cx, cy, -x, y, colour, arc);
+    if (y != 0) {
+        curve_point(cx, cy, x, -y, colour, arc);
+        if (x != 0)
+            curve_point(cx, cy, -x, -y, colour, arc);
+    }
+}
+
+/* An ellipse outline, midpoint algorithm, optionally cut by an arc's clip
+ * line: Ellipse, Circle and Arc are this one walk. */
+static void
+curve_outline(int cx, int cy, int rx, int ry, uint8_t colour,
+              const struct arc_clip *arc)
 {
     if (rx < 0 || ry < 0)
         return;
     if (rx == 0 || ry == 0) {	/* degenerate: a line, not a curve */
         if (rx == 0)
-            vidterm_vline(cx, cy - ry, 2 * ry + 1, colour);
+            for (int y = -ry; y <= ry; y++)
+                curve_point(cx, cy, 0, y, colour, arc);
         else
-            vidterm_hline(cx - rx, cy, 2 * rx + 1, colour);
+            for (int x = -rx; x <= rx; x++)
+                curve_point(cx, cy, x, 0, colour, arc);
         return;
     }
 
@@ -1591,10 +1651,7 @@ void vidterm_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
     long dx = 0, dy = 2 * rx2 * ry;
 
     while (dx < dy) {			/* region 1 */
-        plot_unlocked(cx + (int)x, cy + (int)y, colour);
-        plot_unlocked(cx - (int)x, cy + (int)y, colour);
-        plot_unlocked(cx + (int)x, cy - (int)y, colour);
-        plot_unlocked(cx - (int)x, cy - (int)y, colour);
+        curve_quad(cx, cy, (int)x, (int)y, colour, arc);
         x++;
         dx += 2 * ry2;
         d += ry2 + dx;
@@ -1608,10 +1665,7 @@ void vidterm_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
     d = ry2 * (x * 2 + 1) * (x * 2 + 1) / 4 +
         rx2 * (y - 1) * (y - 1) - rx2 * ry2;
     while (y >= 0) {			/* region 2 */
-        plot_unlocked(cx + (int)x, cy + (int)y, colour);
-        plot_unlocked(cx - (int)x, cy + (int)y, colour);
-        plot_unlocked(cx + (int)x, cy - (int)y, colour);
-        plot_unlocked(cx - (int)x, cy - (int)y, colour);
+        curve_quad(cx, cy, (int)x, (int)y, colour, arc);
         y--;
         dy -= 2 * rx2;
         d += rx2 - dy;
@@ -1621,6 +1675,19 @@ void vidterm_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
             d += dx;
         }
     }
+}
+
+void vidterm_ellipse(int cx, int cy, int rx, int ry, uint8_t colour)
+{
+    curve_outline(cx, cy, rx, ry, colour, NULL);
+}
+
+void vidterm_arc(int cx, int cy, int rx, int ry,
+                 int x1, int y1, int x2, int y2, uint8_t colour)
+{
+    const struct arc_clip a = { x1, y1, x2, y2 };
+
+    curve_outline(cx, cy, rx, ry, colour, &a);
 }
 
 /* Filled ellipse as horizontal spans, one per scanline. Deliberately not the
@@ -2216,31 +2283,6 @@ void vidterm_flood_fill(int x, int y, uint8_t colour)
     if (vidterm_flood_fill_start(x, y, colour))
         while (vidterm_fill_continue())
             ;
-}
-
-void vidterm_circle(int cx, int cy, int radius, uint8_t colour)
-{
-    int x = 0, y = radius;
-    int d = 3 - 2 * radius;
-
-    while (x <= y) {
-        plot_unlocked(cx + x, cy + y, colour);
-        plot_unlocked(cx - x, cy + y, colour);
-        plot_unlocked(cx + x, cy - y, colour);
-        plot_unlocked(cx - x, cy - y, colour);
-        plot_unlocked(cx + y, cy + x, colour);
-        plot_unlocked(cx - y, cy + x, colour);
-        plot_unlocked(cx + y, cy - x, colour);
-        plot_unlocked(cx - y, cy - x, colour);
-
-        if (d < 0) {
-            d += 4 * x + 6;
-        } else {
-            d += 4 * (x - y) + 10;
-            y--;
-        }
-        x++;
-    }
 }
 
 /* ─────────────────────────────── bring-up ───────────────────────────────── */

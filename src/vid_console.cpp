@@ -755,6 +755,12 @@ esc_exec(void)
 	case 0x54u:			/* FEllipse */
 		vidterm_fill_ellipse(dp_x, dp_y, p16(0), p16(2), fg);
 		break;
+	case 0x52u:			/* Arc: radii, then the clip line */
+		/* The clip line's ends are SIGNED offsets from the centre
+		 * (GrfDrv accepts negatives), the radii plain sizes. */
+		vidterm_arc(dp_x, dp_y, p16(0), p16(2),
+		    s16(4), s16(6), s16(8), s16(10), fg);
+		break;
 	case 0x34u:
 		/* Border: accepted and deliberately does nothing. A CoCo3 has
 		 * a border region around its active display and this panel has
@@ -792,8 +798,9 @@ esc_exec(void)
 			state = ST_ESC_SKIP;
 		break;
 	default:
-		/* Framed but not yet implemented (window lifecycle, buffers,
-		 * fonts, circles/ellipses/arc/ffill, reserved slots). */
+		/* Framed and deliberately inert: OWSet/OWEnd ($22/$23),
+		 * ScaleSw ($35) and the reserved slots. Their parameters were
+		 * consumed by the framing, so the stream stays in step. */
 		break;
 	}
 }

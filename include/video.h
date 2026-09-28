@@ -145,8 +145,12 @@ void vidterm_line(int x0, int y0, int x1, int y1, uint8_t colour);
 void vidterm_fill_rect(int x, int y, int w, int h, uint8_t colour);
 void vidterm_hline(int x, int y, int len, uint8_t colour);
 void vidterm_vline(int x, int y, int len, uint8_t colour);
-void vidterm_circle(int cx, int cy, int radius, uint8_t colour);
 void vidterm_ellipse(int cx, int cy, int rx, int ry, uint8_t colour);
+/* An ellipse outline cut by the line (x1,y1)-(x2,y2), given as offsets from
+ * the centre: CoCo3 GrfDrv's Arc, points kept on one side of the line (see
+ * video_render.cpp for the exact rule). */
+void vidterm_arc(int cx, int cy, int rx, int ry,
+                 int x1, int y1, int x2, int y2, uint8_t colour);
 void vidterm_fill_ellipse(int cx, int cy, int rx, int ry, uint8_t colour);
 
 /* Flood fill from a seed, bounded by pixels differing from the seed's own
