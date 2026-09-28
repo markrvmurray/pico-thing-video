@@ -218,6 +218,13 @@ void vid_link_irq_out(bool assert);
  * render core. */
 void vid_link_bell(void);
 
+/* The guest's Tone command ($1B $27): CoCo 3 SS.Tone values unchanged --
+ * pitch 1-4095 (relative, higher is higher), duration in 1/60 s ticks with 0
+ * meaning stop now, volume 0-63. Starts at once and replaces any tone or bell
+ * sounding; it does not hold the byte stream up. Platform-provided, like the
+ * bell. Render core. */
+void vid_link_tone(uint16_t pitch, uint8_t ticks, uint8_t volume);
+
 /* True while this device is asserting !IRQ. */
 bool vid_link_irq_asserted(void);
 

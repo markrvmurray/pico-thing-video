@@ -15,6 +15,7 @@
 
 #include "pico_thing_video.h"
 #include "sound.h"
+#include "tone_convert.h"
 #include "vid_link.h"
 
 /* The bell: short, mid-pitched, loud -- the amplifier has its own volume
@@ -27,6 +28,7 @@ static uint     slice, channel;
 static bool     playing;
 static uint32_t started_us, length_us;
 static uint32_t bells;			/* for status: the guest's $07s */
+static uint32_t tones;			/* and its $1B $27s */
 
 void
 sound_init(void)
@@ -96,9 +98,10 @@ sound_poll(void)
 void
 sound_print_status(void)
 {
-	printf("Sound:       GP%u PWM, %s; %lu bell%s\n", (unsigned)GPIO_AUDIO,
-	    playing ? "playing" : "idle", (unsigned long)bells,
-	    bells == 1u ? "" : "s");
+	printf("Sound:       GP%u PWM, %s; %lu bell%s, %lu tone%s\n",
+	    (unsigned)GPIO_AUDIO, playing ? "playing" : "idle",
+	    (unsigned long)bells, bells == 1u ? "" : "s",
+	    (unsigned long)tones, tones == 1u ? "" : "s");
 }
 
 /* The console's bell, $07. Platform-provided, like vid_link_irq_out(): the
@@ -108,4 +111,15 @@ extern "C" void
 vid_link_bell(void)
 {
 	sound_bell();
+}
+
+/* The guest's Tone. Duration 0 or volume 0 stops whatever is sounding, and a
+ * pitch the PWM stage cannot make (outside 1-4095, or above 20 kHz) is
+ * silence -- both by way of sound_tone()'s own range check. */
+extern "C" void
+vid_link_tone(uint16_t pitch, uint8_t ticks, uint8_t volume)
+{
+	tones++;
+	sound_tone(tone_pitch_to_hz(pitch), tone_ticks_to_ms(ticks),
+	    (uint8_t)tone_volume_to_pct(volume));
 }

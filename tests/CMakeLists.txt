@@ -89,6 +89,13 @@ target_include_directories(test_adc_convert PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
 )
 target_link_libraries(test_adc_convert PRIVATE Catch2::Catch2WithMain)
+# test_tone_convert: the guest Tone command's CoCo 3 SS.Tone values -- pitch,
+# ticks, volume -- to what the PWM stage takes. Header-only, like the ADC.
+add_executable(test_tone_convert test_tone_convert.cpp)
+target_include_directories(test_tone_convert PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+target_link_libraries(test_tone_convert PRIVATE Catch2::Catch2WithMain)
 # ---------------------------------------------------------------------------
 # test_mem_ops: the firmware's own memcpy/memmove/memset/bzero, exhaustively.
 # Compiled from the firmware source under renamed symbols, and freestanding so
@@ -110,3 +117,4 @@ add_test(NAME mem_ops_no_libc_calls COMMAND sh -c
 
 catch_discover_tests(test_command_parser)
 catch_discover_tests(test_adc_convert)
+catch_discover_tests(test_tone_convert)

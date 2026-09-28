@@ -87,7 +87,7 @@ static int  pend_col;
  * exact framing would matter again. */
 static const uint8_t esc_params[0x56 - 0x20] = {
 	8, 1, 7, 0, 0, 4,	/* $20 DWSet Select OWSet OWEnd DWEnd CWArea */
-	1, 0, 0,		/* $26 DWShow, $27-$28 reserved */
+	1, 4, 0,		/* $26 DWShow, $27 Tone, $28 reserved */
 	4, 2, 9, 10, 6,		/* $29 DefGPB KillBuf GPLoad GetBlk PutBlk */
 	2, 1,			/* $2E PSet LSet */
 	0, 2, 1, 1, 1,		/* $30 DefPal Palette FColor BColor Border */
@@ -754,6 +754,15 @@ esc_exec(void)
 		break;
 	case 0x54u:			/* FEllipse */
 		vidterm_fill_ellipse(dp_x, dp_y, p16(0), p16(2), fg);
+		break;
+	case 0x27u:			/* Tone: pitch(2), ticks, volume */
+		/* A Pico-Thing addition in a slot CoWin leaves free, carrying
+		 * CoCo 3 SS.Tone values unchanged so a driver can forward the
+		 * SetStat as it stands. It starts the sound and returns: the
+		 * guest's driver sleeps out the duration itself, which is what
+		 * gives SS.Tone its CoCo behaviour of returning when the note
+		 * ends. One voice, no queue. */
+		vid_link_tone(p16(0), esc_buf[2], esc_buf[3]);
 		break;
 	case 0x52u:			/* Arc: radii, then the clip line */
 		/* The clip line's ends are SIGNED offsets from the centre
