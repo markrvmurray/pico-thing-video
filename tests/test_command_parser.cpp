@@ -248,6 +248,35 @@ TEST_CASE("trace: zero and non-decimal counts are rejected", "[parser][trace]")
 	CHECK_FALSE(run("trace 12 34").ok);
 }
 
+TEST_CASE("beep: the bell by default, or a tone in decimal Hz and ms", "[parser][beep]")
+{
+	Result r = run("beep");
+	REQUIRE(r.ok);
+	CHECK(r.cmd.tag == CMD_BEEP);
+	CHECK(r.cmd.beep.hz == 0u);		/* 0 = the bell */
+	CHECK(run("bp").cmd.tag == CMD_BEEP);
+
+	r = run("beep 440");
+	REQUIRE(r.ok);
+	CHECK(r.cmd.beep.hz == 440u);		/* decimal, not hex */
+	CHECK(r.cmd.beep.ms == 200u);		/* the default length */
+
+	r = run("bp 2000 50");
+	REQUIRE(r.ok);
+	CHECK(r.cmd.beep.hz == 2000u);
+	CHECK(r.cmd.beep.ms == 50u);
+}
+
+TEST_CASE("beep: out-of-range and malformed arguments are rejected", "[parser][beep]")
+{
+	CHECK_FALSE(run("beep 19").ok);		/* below 20 Hz */
+	CHECK_FALSE(run("beep 20001").ok);	/* above 20 kHz */
+	CHECK_FALSE(run("beep 440 0").ok);	/* no duration */
+	CHECK_FALSE(run("beep 440 10001").ok);	/* over 10 s */
+	CHECK_FALSE(run("beep ab").ok);		/* hex digits, not decimal */
+	CHECK_FALSE(run("beep 440 100 5").ok);	/* trailing argument */
+}
+
 TEST_CASE("unknown commands are rejected", "[parser]")
 {
 	Result r = run("frobnicate");

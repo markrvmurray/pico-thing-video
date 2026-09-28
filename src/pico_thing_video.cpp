@@ -47,6 +47,7 @@
 #include "i2c_service.h"
 #include "pico_thing_video.h"
 #include "power.h"
+#include "sound.h"
 #include "usb.h"
 #include "vid_link.h"
 #include "win_store.h"
@@ -355,6 +356,7 @@ main()
 	// power on. On power loss it reboots back into this standby (below).
 	power_init();
 	i2c_service_init();
+	sound_init();		/* silent: the pin idles low */
 	if (!power_is_on()) {
 		printf("Core0 standby: main 5V is absent — console only\n");
 		while (!power_is_on()) {
@@ -398,6 +400,7 @@ main()
 
 		console_poll();
 		power_task();
+		sound_poll();		/* end a tone whose time is up */
 
 		// Keep the input FIFO fed when measuring. Bounded per pass so
 		// this cannot starve the rest of the loop, and it uses the

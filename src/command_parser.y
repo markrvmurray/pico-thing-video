@@ -102,6 +102,7 @@ static int      _byte_count;
 %token TOK_PSRAM
 %token TOK_SELFTEST
 %token TOK_TRACE
+%token TOK_BEEP
 %token TOK_STATUS
 %token TOK_EXAMINE
 %token TOK_MODIFY
@@ -132,6 +133,7 @@ command:
 	| psram_cmd
 	| selftest_cmd
 	| trace_cmd
+	| beep_cmd
 	| status_cmd
 	| examine_cmd
 	| modify_cmd
@@ -189,6 +191,39 @@ trace_cmd:
 		}
 		result->tag         = CMD_TRACE;
 		result->trace.count = (uint32_t)v;
+	}
+	;
+
+/* beep [ <hz> [ <ms> ] ]   (decimal; no hz = the bell, no ms = 200) */
+beep_cmd:
+	  TOK_BEEP {
+		result->tag     = CMD_BEEP;
+		result->beep.hz = 0u;
+		result->beep.ms = 0u;
+	}
+	| TOK_BEEP TOK_NUMBER {
+		long v = parse_dec($2);
+		if (v == LONG_MIN || v < 20 || v > 20000) {
+			printf("Invalid frequency '%s' (decimal Hz, 20-20000)\n", $2);
+			YYERROR;
+		}
+		result->tag     = CMD_BEEP;
+		result->beep.hz = (uint32_t)v;
+		result->beep.ms = 200u;
+	}
+	| TOK_BEEP TOK_NUMBER TOK_NUMBER {
+		long v = parse_dec($2), d = parse_dec($3);
+		if (v == LONG_MIN || v < 20 || v > 20000) {
+			printf("Invalid frequency '%s' (decimal Hz, 20-20000)\n", $2);
+			YYERROR;
+		}
+		if (d == LONG_MIN || d <= 0 || d > 10000) {
+			printf("Invalid duration '%s' (decimal ms, 1-10000)\n", $3);
+			YYERROR;
+		}
+		result->tag     = CMD_BEEP;
+		result->beep.hz = (uint32_t)v;
+		result->beep.ms = (uint32_t)d;
 	}
 	;
 

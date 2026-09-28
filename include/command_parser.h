@@ -26,6 +26,7 @@ typedef enum cmd_tag {
 	CMD_TRACE,
 	CMD_STATUS,
 	CMD_POWER,
+	CMD_BEEP,
 	CMD_I2C_SCAN,
 
 	CMD_EXAMINE,
@@ -43,6 +44,8 @@ typedef struct parsed_cmd {
 			uint32_t period; /* repeat period in ms; 0 = once */
 		} status;
 		struct { uint32_t count; } trace;
+		/* CMD_BEEP: hz 0 = the bell */
+		struct { uint32_t hz, ms; } beep;
 
 		/* CMD_MODIFY */
 		struct {

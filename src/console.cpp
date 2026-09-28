@@ -50,6 +50,7 @@
 #include "i2c_service.h"
 #include "pico_thing_video.h"
 #include "power.h"
+#include "sound.h"
 #include "registers.h"
 #include "usb.h"
 #include "vid_link.h"
@@ -154,6 +155,7 @@ print_status()
 	win_store_print_status();
 	vid_link_print_status();
 	vid_link_mouse_print();
+	sound_print_status();
 	registers::dump();
 }
 
@@ -297,6 +299,7 @@ status_done:
 		"  status [period]    (st)  status; period (decimal ms) repeats\n"
 		"                           until a key is pressed\n"
 		"  power              (pw)  show the sensed main 5V rail\n"
+		"  beep [hz [ms]]     (bp)  a tone on GP40 (default: the bell; ms 200)\n"
 		"  i2c                (ic)  report HPD and scan the HDMI DDC bus\n"
 #if !USB_HOST_MODE
 		"  usb <args>         (ub)  send words to the USB CDC guest console\n"
@@ -311,6 +314,21 @@ status_done:
 		"\nThe peripheral follows the main 5V rail: bus and video serve only\n"
 		"while it is up; on power loss the firmware restarts into standby\n"
 		"(console only) and waits for power to return.\n\n");
+		break;
+
+	case CMD_BEEP:
+		/* Bench bring-up for the audio path -- filter, amplifier and
+		 * speaker -- without a guest: the bell by default, or any
+		 * tone. */
+		if (cmd.beep.hz == 0u) {
+			sound_bell();
+			printf("Beep: the bell (1000 Hz, 120 ms)\n");
+		} else {
+			sound_tone(cmd.beep.hz, cmd.beep.ms, 100u);
+			printf("Beep: %lu Hz for %lu ms\n",
+			    (unsigned long)cmd.beep.hz,
+			    (unsigned long)cmd.beep.ms);
+		}
 		break;
 
 	case CMD_POWER:

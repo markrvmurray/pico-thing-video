@@ -944,7 +944,8 @@ vid_link_consume(uint8_t b)
 			line_feed();
 		}
 		break;
-	case 0x07u:			/* bell — no beeper on this device */
+	case 0x07u:			/* bell: the platform makes it a sound */
+		vid_link_bell();
 		break;
 	case 0x08u:			/* cursor left (non-destructive) */
 		if (cur_col > 0)

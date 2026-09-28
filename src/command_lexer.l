@@ -77,6 +77,7 @@ match_command_keyword(const char *text)
 		{ "help",    "h",  TOK_HELP    },
 		{ "i2c",     "ic", TOK_I2C     },
 		{ "power",   "pw", TOK_POWER   },
+		{ "beep",    "bp", TOK_BEEP    },
 		{ "verbose", "vb", TOK_VERBOSE },
 		{ "flood",   "fl", TOK_FLOOD   },
 		{ "priority","pr", TOK_PRIORITY},

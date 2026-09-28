@@ -212,6 +212,12 @@ void vid_link_render(void);
  * hot loop, which must not poke hardware on every pass. */
 void vid_link_irq_out(bool assert);
 
+/* The console bell ($07): make a short sound. Platform-provided for the same
+ * reason -- the console is portable, and how a board makes a sound (PWM on a
+ * pin here; a counter in the simulator) is not its business. Called on the
+ * render core. */
+void vid_link_bell(void);
+
 /* True while this device is asserting !IRQ. */
 bool vid_link_irq_asserted(void);
 

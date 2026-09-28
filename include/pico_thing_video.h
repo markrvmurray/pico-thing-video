@@ -74,6 +74,11 @@ enum {
 	// divide-by-2 resistor pair, so a healthy rail reads ~2.5 V. Sampled by
 	// power.cpp to follow the host system's power state automatically.
 	GPIO_PWR_SENSE = 46,	// [Y] [i]  ADC6: main 5V rail / 2
+
+	// Sound (v2.0 PCB): test point TP613, otherwise unused, to an external
+	// RC low-pass, a small amplifier and a speaker. PWM at the tone's own
+	// frequency; the duty is the volume. See sound.h.
+	GPIO_AUDIO     = 40,	// [ ] [o]  PWM tone (TP613)
 };
 
 // HSTX drives GPIO_HSTX_COUNT consecutive pins starting at GPIO_HSTX_BASE.
