@@ -96,10 +96,12 @@ protocol.
 
 ## Debugging
 
-OpenOCD with `pico.cfg` (CMSIS-DAP over SWD); with two probes attached,
-`probe_video.cfg` selects this board's by serial number. The console is on
-UART0 in every build. For register inspection, load the Pico SDK's
-`src/rp2350/hardware_regs/RP2350.svd` into the debugger's Peripherals view.
+OpenOCD with `pico.cfg` (CMSIS-DAP over SWD), the only config in the repo:
+it is pinned by serial number to this board's probe, so it never picks the
+main board's, and it is self-contained for CLion, `scripts/flash.sh` or
+`openocd -f`. The console is on UART0 in every build. For register
+inspection, load the Pico SDK's `src/rp2350/hardware_regs/RP2350.svd` into
+the debugger's Peripherals view.
 
 ## Interactive console
 
