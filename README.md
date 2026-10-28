@@ -98,7 +98,8 @@ protocol.
 
 OpenOCD with `pico.cfg` (CMSIS-DAP over SWD); with two probes attached,
 `probe_video.cfg` selects this board's by serial number. The console is on
-UART0 in every build. `rp2350.svd` is included for register inspection.
+UART0 in every build. For register inspection, load the Pico SDK's
+`src/rp2350/hardware_regs/RP2350.svd` into the debugger's Peripherals view.
 
 ## Interactive console
 
