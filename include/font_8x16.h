@@ -1,11 +1,11 @@
 /*
- * font_spleen_8x16.h -- Spleen 8x16 bitmap font, CP437 (256 glyphs)
+ * font_8x16.h -- Spleen 8x16 bitmap font, CP437 (256 glyphs)
  *
  * Spleen 2.2.0 by Frederic Cambus
  * https://github.com/fcambus/spleen
  * BSD 2-Clause license. See LICENSE-spleen for details.
  *
- * Layout: font_spleen_8x16[char_code][scanline_row]
+ * Layout: font_8x16[char_code][scanline_row]
  *   Each byte is 8 pixels, MSB = leftmost pixel.
  *   256 characters, 16 rows each = 4096 bytes total.
  */
@@ -14,7 +14,10 @@
 
 #include <stdint.h>
 
-static const uint8_t font_spleen_8x16[256][16] = {
+/* The font's name, as a status line or a log would show it. */
+static const char font_8x16_name[] = "Spleen 2.2.0";
+
+static const uint8_t font_8x16[256][16] = {
     { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },  /* 0x00      */
     { 0x00, 0x00, 0x7E, 0x81, 0xA5, 0x81, 0x81, 0xA5, 0x99, 0x81, 0x81, 0x7E, 0x00, 0x00, 0x00, 0x00 },  /* 0x01      */
     { 0x00, 0x00, 0x7E, 0xFF, 0xDB, 0xFF, 0xFF, 0xDB, 0xE7, 0xFF, 0xFF, 0x7E, 0x00, 0x00, 0x00, 0x00 },  /* 0x02      */

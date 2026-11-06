@@ -18,7 +18,7 @@
 #include "gfx_shadow.h"
 #include "fill_log.h"
 #include "gfx_bufs.h"
-#include "font_spleen_8x16.h"
+#include "font_8x16.h"
 
 /* ───────────────────────── compile-time parameters ──────────────────────── */
 
@@ -171,7 +171,7 @@ static inline uint8_t font_row(uint8_t ch, int row)
          * feature. */
         v = (at < font_face_len) ? font_face[at] : 0u;
     } else {
-        v = font_spleen_8x16[ch][r];
+        v = font_8x16[ch][r];
     }
 
     /* Bold by smearing one pixel right, which is what a bitmap font can do
