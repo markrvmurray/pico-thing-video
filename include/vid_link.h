@@ -271,6 +271,14 @@ void vid_link_mouse_print(void);
  * loopback, the only other producer, is a test mode). Drops when full. */
 void vid_link_input(uint8_t byte);
 
+/* Enqueue a reply the console owes the guest -- the answer to a terminal
+ * query such as ESC [ 6 n -- as input bytes, read exactly like keystrokes.
+ * All-or-nothing: if the input FIFO lacks room for every byte, none is
+ * queued, the loss is counted in status, and FALSE comes back. Core 0 (the
+ * render side), the same core as the keyboard cooker, so the ring keeps a
+ * single producer. */
+bool vid_link_input_reply(const uint8_t *bytes, unsigned n);
+
 /* True while the guest has input it has not yet read. Core 0, for the
  * keyboard's auto-repeat, which holds a repeat back rather than queue one
  * behind an unread byte. */

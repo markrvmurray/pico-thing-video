@@ -298,6 +298,7 @@ static volatile uint32_t stat_rx_popped;	/* Data reads that dequeued */
 static volatile uint32_t stat_rx_overruns;	/* loopback pushes dropped */
 static volatile uint32_t stat_tx_capped;	/* drains that hit the bound */
 static volatile uint32_t stat_tx_dropped;	/* writes lost to a full FIFO */
+static volatile uint32_t stat_rx_replies_lost;	/* console replies with no room */
 static volatile uint8_t  stat_last_byte;
 
 extern registers &reg;
@@ -422,6 +423,25 @@ extern "C" bool
 vid_link_input_pending(void)
 {
 	return rx_level() != 0u;
+}
+
+extern "C" bool
+vid_link_input_reply(const uint8_t *bytes, unsigned n)
+{
+	/* WHOLE OR NOT AT ALL. A reply is a framed sequence the guest parses
+	 * (ESC [ rows ; cols R), and half of one is worse than none: the guest
+	 * would read the start of a reply, wait for the rest, and then take
+	 * the user's next keystrokes as its digits. rx_push() drops byte by
+	 * byte when the ring is full, so the room is checked first, for the
+	 * whole reply. Only the consumer can make room meanwhile, so a check
+	 * made here can only be pessimistic, never wrong. */
+	if (n > RX_FIFO_SIZE - rx_level()) {
+		stat_rx_replies_lost = stat_rx_replies_lost + 1u;
+		return false;
+	}
+	for (unsigned i = 0; i < n; i++)
+		rx_push(bytes[i]);
+	return true;
 }
 
 extern "C" void
@@ -698,4 +718,10 @@ vid_link_print_status(void)
 	       (unsigned)rx_level(),
 	       (unsigned long)stat_rx_overruns,
 	       (reg[VID_STAT_OFFSET] & VID_STAT_RDRF) ? "set" : "clear");
+	/* Silent when zero, like the drop count: a lost reply means a guest
+	 * asked the console something and is still waiting for the answer. */
+	if (stat_rx_replies_lost != 0u)
+		printf("             %lu console replies LOST — no room in"
+		       " the input FIFO\n",
+		       (unsigned long)stat_rx_replies_lost);
 }

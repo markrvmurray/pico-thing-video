@@ -57,7 +57,8 @@ enum param_state {
 	ST_ATTR_ARG,		/* $1F seen; next byte is its sub-code */
 	ST_ESC_OP,		/* $1B seen; next byte is the sub-code */
 	ST_ESC_PARAM,		/* collecting a graphics command's params */
-	ST_ESC_SKIP		/* swallowing GPLoad's streamed payload */
+	ST_ESC_SKIP,		/* swallowing GPLoad's streamed payload */
+	ST_CSI			/* $1B [ seen: an ANSI control sequence */
 };
 
 static enum param_state state;
@@ -836,6 +837,123 @@ xy_param(uint8_t b, int limit)
 	return v;
 }
 
+/* ── ANSI/VT100 control sequences ($1B $5B, "ESC [") ─────────────────────
+ * Not part of the CoCo3 set: these exist so a guest on a SERIAL console,
+ * which has no register window and so no VID.Info, can learn the screen's
+ * size the way xterm's resize does -- move the cursor somewhere absurd, ask
+ * where it ended up, and read the answer as input. Over the register window
+ * the same queries work too, which is what lets one utility serve both.
+ *
+ * $5B lies outside the $20-$55 sub-code range, so it cannot collide with a
+ * CoCo3 command; it used to be dropped as out of range, and the rest of the
+ * sequence then printed as text.
+ *
+ * The shape is ECMA-48's: parameter bytes $30-$3F, intermediate bytes
+ * $20-$2F, one final byte $40-$7E. Every sequence of that shape is consumed
+ * WHOLE, whether or not it is one we act on, for the same reason every $1B
+ * sub-code is framed: an unrecognised sequence must never leave bytes behind
+ * to be printed or, worse, parsed as something else. A byte outside all
+ * three ranges ends the sequence early and is then acted on as usual -- a
+ * VT100 does the same with C0 controls, and it means a $1B arriving inside
+ * a sequence starts a fresh escape rather than being lost. */
+#define CSI_PARAMS_MAX	4u	/* stored; later ones are consumed unread */
+#define CSI_VALUE_MAX	9999u	/* a value saturates rather than wraps */
+
+static uint16_t csi_param[CSI_PARAMS_MAX];
+static uint8_t  csi_n;		/* index of the parameter being read */
+static bool     csi_foreign;	/* private marker or intermediate: not ours */
+
+static void
+csi_begin(void)
+{
+	for (unsigned i = 0; i < CSI_PARAMS_MAX; i++)
+		csi_param[i] = 0u;
+	csi_n = 0u;
+	csi_foreign = false;
+	state = ST_CSI;
+}
+
+/* Append v in decimal; returns the new length. */
+static unsigned
+put_dec(uint8_t *buf, unsigned at, unsigned v)
+{
+	char digits[6];
+	unsigned n = 0;
+
+	do {
+		digits[n++] = (char)('0' + v % 10u);
+		v /= 10u;
+	} while (v != 0u && n < sizeof(digits));
+	while (n != 0u)
+		buf[at++] = (uint8_t)digits[--n];
+	return at;
+}
+
+static void
+csi_exec(uint8_t final)
+{
+	/* A private marker ($3C-$3F, as in ESC [ ? 25 l) or an intermediate byte
+	 * makes this a different function from any we implement -- ESC [ ? 6 n
+	 * is DEC's extended report, for one, with a different reply. Consumed,
+	 * deliberately not answered. */
+	if (csi_foreign)
+		return;
+
+	/* An omitted parameter and an explicit 0 both mean the default, which
+	 * is 1 for a position, exactly as on a VT100. */
+	const unsigned nparams = (unsigned)csi_n + 1u;
+	uint8_t reply[16];
+	unsigned len = 0;
+
+	switch (final) {
+	case 'H':			/* CUP: cursor position */
+	case 'f': {			/* HVP: the same function */
+		unsigned row = csi_param[0] ? csi_param[0] : 1u;
+		unsigned col = csi_param[1] ? csi_param[1] : 1u;
+
+		/* Clamped, not rejected: ESC [ 999;999 H is how the size query
+		 * finds the bottom right, so the clamp IS the feature. */
+		if (row > (unsigned)win_rows)
+			row = (unsigned)win_rows;
+		if (col > (unsigned)win_cols)
+			col = (unsigned)win_cols;
+		cur_row = (int)row - 1;
+		cur_col = (int)col - 1;
+		return;
+	}
+	case 'n':			/* DSR: only 6, the cursor report */
+		if (nparams != 1u || csi_param[0] != 6u)
+			return;
+		reply[len++] = 0x1Bu;
+		reply[len++] = '[';
+		len = put_dec(reply, len, (unsigned)cur_row + 1u);
+		reply[len++] = ';';
+		len = put_dec(reply, len, (unsigned)cur_col + 1u);
+		reply[len++] = 'R';
+		break;
+	case 't':			/* xterm window ops: only 18, the size */
+		/* Exactly one parameter. ESC [ 8 ; rows ; cols t is the REQUEST
+		 * to resize a window, and must not be mistaken for a query. */
+		if (nparams != 1u || csi_param[0] != 18u)
+			return;
+		reply[len++] = 0x1Bu;
+		reply[len++] = '[';
+		reply[len++] = '8';
+		reply[len++] = ';';
+		len = put_dec(reply, len, (unsigned)win_rows);
+		reply[len++] = ';';
+		len = put_dec(reply, len, (unsigned)win_cols);
+		reply[len++] = 't';
+		break;
+	default:
+		return;
+	}
+	/* The current window's working area throughout: the cursor is held in
+	 * those terms, and win_rows/win_cols are the same figures VID.Info
+	 * publishes, so a guest that asks both ways gets one answer. */
+	(void)vid_link_input_reply(reply, len);
+}
+
 extern "C" void
 vid_link_consume_begin(void)
 {
@@ -858,6 +976,10 @@ vid_link_consume(uint8_t b)
 	switch (state) {
 	case ST_ESC_OP:
 		state = ST_NORMAL;
+		if (b == 0x5Bu) {	/* ESC [ : an ANSI control sequence */
+			csi_begin();
+			return;
+		}
 		if (b >= 0x20u && b <= 0x55u) {
 			esc_op = b;
 			esc_need = esc_params[b - 0x20u];
@@ -900,6 +1022,36 @@ vid_link_consume(uint8_t b)
 		cursor_shown = (b == 0x21u);	/* $20 off / $21 on */
 		state = ST_NORMAL;
 		return;
+	case ST_CSI:
+		if (b >= '0' && b <= '9') {
+			if (csi_n < CSI_PARAMS_MAX) {
+				unsigned v = (unsigned)csi_param[csi_n] * 10u +
+				    (unsigned)(b - '0');
+
+				csi_param[csi_n] = (uint16_t)(v > CSI_VALUE_MAX ?
+				    CSI_VALUE_MAX : v);
+			}
+			return;
+		}
+		if (b == ';') {
+			if (csi_n != 0xFFu)
+				csi_n++;
+			return;
+		}
+		if (b >= 0x20u && b <= 0x3Fu) {
+			/* Private markers ($3C-$3F), ':' and the intermediates
+			 * ($20-$2F): still part of the sequence, never ours. */
+			csi_foreign = true;
+			return;
+		}
+		state = ST_NORMAL;
+		if (b >= 0x40u && b <= 0x7Eu) {
+			csi_exec(b);
+			return;
+		}
+		/* Not a sequence byte at all: the sequence ends here and this
+		 * byte is acted on normally, below. */
+		break;
 	case ST_ATTR_ARG:
 		/* The CoCo3 $1F family (GrfDrv L1483): exactly two bytes,
 		 * $1F then a sub-code. An unknown sub-code is consumed and
@@ -1009,6 +1161,7 @@ vid_link_consume_class(void)
 	case ST_CURSOR_ARG:
 	case ST_ATTR_ARG:
 	case ST_ESC_PARAM:
+	case ST_CSI:
 		return VID_BYTE_PARAM;
 	}
 	return VID_BYTE_PARAM;
