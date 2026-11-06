@@ -93,7 +93,7 @@ static const uint8_t esc_params[0x56 - 0x20] = {
 	2, 1,			/* $2E PSet LSet */
 	0, 2, 1, 1, 1,		/* $30 DefPal Palette FColor BColor Border */
 	1, 1,			/* $35 ScaleSw DWProtSw */
-	0, 0,			/* $37-$38 reserved */
+	0, 0,			/* $37 DECSC, $38 DECRC (ESC 7 / ESC 8) */
 	2, 2,			/* $39 GCSet Font */
 	0,			/* $3B reserved */
 	1, 1,			/* $3C TCharSw Bold */
@@ -171,6 +171,14 @@ struct window {
 	int	cur_col, cur_row;	/* cursor WITHIN the window */
 	int	slot;			/* parked screen, or -1 for none */
 	bool	inverse;		/* $1F $20/$21: reverse video */
+	/* ESC 7 / ESC 8 (DECSC/DECRC). Per window, not one slot for the
+	 * console: several windows share this one stream, so a single slot
+	 * would let a background shell's save clobber the foreground's.
+	 * Bytes, since a window is at most 128 x 30 cells, and placed after
+	 * the bool so they sit in padding the struct already had: between
+	 * the ints they cost four bytes a window in SRAM that is nearly
+	 * gone. */
+	uint8_t	saved_col, saved_row;
 };
 
 static struct window windows[WIN_MAX];
@@ -510,6 +518,8 @@ win_define(unsigned id, int x, int y, int cols, int rows)
 	w->inverse = false;		/* a (re)defined window starts plain */
 	w->cur_col = 0;
 	w->cur_row = 0;
+	w->saved_col = 0;		/* ESC 8 before any ESC 7 homes */
+	w->saved_row = 0;
 }
 
 static void
@@ -576,6 +586,27 @@ esc_exec(void)
 		cur_row = 0;
 		break;
 	}
+	case 0x37u:			/* ESC 7: save the cursor (DECSC) */
+		/* The POSITION only. A VT100 also saves the rendition and
+		 * character set; the analogue here would be inverse, which a
+		 * CoCo3 program sets with $1F $20/$21 and would not expect an
+		 * ESC 8 to undo. What these two are for is the terminal size
+		 * query (ESC 7, ESC [ 999;999 H, ESC [ 6 n, ESC 8), which has
+		 * to leave the cursor where it found it -- and any VT100
+		 * program that saves and restores around a status line. */
+		windows[win_target].saved_col = (uint8_t)cur_col;
+		windows[win_target].saved_row = (uint8_t)cur_row;
+		break;
+	case 0x38u:			/* ESC 8: restore the cursor (DECRC) */
+		/* Clamped, because CWArea may have narrowed the working area
+		 * since the save. Before any save it homes, as a VT100 does. */
+		cur_col = windows[win_target].saved_col;
+		cur_row = windows[win_target].saved_row;
+		if (cur_col >= win_cols)
+			cur_col = win_cols - 1;
+		if (cur_row >= win_rows)
+			cur_row = win_rows - 1;
+		break;
 	case 0x36u:			/* DWProtSw: 0 off, non-zero on */
 		/* GRAPHICS only. Text stays inside its window whatever this
 		 * says, because wrap and scroll are DEFINED by the window --
@@ -1226,6 +1257,8 @@ vid_link_consume_reset(void)
 	windows[0].protect = true;
 	windows[0].cur_col = 0;
 	windows[0].cur_row = 0;
+	windows[0].saved_col = 0;
+	windows[0].saved_row = 0;
 	windows[0].slot = -1;
 	windows[0].inverse = false;
 	win_shown = 0u;
