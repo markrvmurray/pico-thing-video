@@ -58,6 +58,8 @@ enum : uint8_t {
 	KEY_COMMA = 0x36, KEY_PERIOD = 0x37, KEY_SLASH = 0x38,
 	KEY_CAPS_LOCK = 0x39,
 	KEY_F1 = 0x3A, KEY_F12 = 0x45,
+	KEY_INSERT = 0x49, KEY_HOME = 0x4A, KEY_PAGE_UP = 0x4B,
+	KEY_DELETE = 0x4C, KEY_END = 0x4D, KEY_PAGE_DOWN = 0x4E,
 	KEY_RIGHT = 0x4F, KEY_LEFT = 0x50, KEY_DOWN = 0x51, KEY_UP = 0x52,
 	KEY_NUM_LOCK = 0x53,
 	KEY_KP_SLASH = 0x54, KEY_KP_STAR = 0x55, KEY_KP_MINUS = 0x56,
@@ -68,57 +70,60 @@ enum : uint8_t {
 	KEY_EUROPE_2 = 0x64,
 };
 
-/* The arrows send the CoCo keyboard's bytes, taken from the driver OS-9
- * software was written against -- level1/modules/vtio.asm, KeyTbl, whose
- * three columns are plain, Shift and Ctrl:
+/* EVERY KEY IS ONE BYTE, and the special keys have bytes of their own, with
+ * bit 7 set, that nothing else produces:
  *
- *          plain  Shift  Ctrl
- *   up      $0C    $1C    $13
- *   down    $0A    $1A    $12
- *   left    $08    $18    $10
- *   right   $09    $19    $11
+ *   F1-F12          $80-$8B
+ *                   up    down  left  right
+ *   arrows, plain   $8C   $8D   $8E   $8F
+ *   arrows, Shift   $90   $91   $92   $93
+ *   arrows, Ctrl    $94   $95   $96   $97
+ *   Home $98   End $99   PgUp $9A   PgDn $9B   Ins $9D   Del $9E
  *
- * The modified columns MATTER: minted pages with Shift+Up/Down, deletes with
- * Shift+Left/Right and goes to line start/end with Ctrl+Left/Right. A first
- * version followed the Wildbits PS/2 driver and ignored modifiers, which left
- * all six unreachable except as raw control codes nobody would guess. vtio
- * tests Shift first, so with both held Shift wins; so does this.
+ * ($9C is the pound sign, CP437, and stays so.) The arrows used to send the
+ * CoCo keyboard's bytes from vtio's KeyTbl, which ARE control codes: left was
+ * Backspace's $08, right Tab's $09, down LF, up FF, Ctrl+Up XOFF and
+ * Shift+Left SCF's line-kill -- so a program could not tell an arrow from the
+ * key it collided with, and a shell prompt erased its line on Shift+Left.
+ * Now Backspace, Tab, LF and FF only ever mean themselves.
  *
- * The collisions come with the convention and are the same on a real CoCo3:
- * plain left is Backspace's byte and right is Tab's; Ctrl+Up is XOFF and
- * Ctrl+Right XON (the video console does no flow control); Shift+Left is
- * SCF's line-kill, so at a shell prompt it erases the line, as on a CoCo. */
+ * The modified arrow columns matter (minted pages with Shift+Up/Down and goes
+ * to line ends with Ctrl+Left/Right). With both held Shift wins, as in vtio.
+ * The editing keys ignore Shift and Ctrl. Delete is the FORWARD delete; $7F
+ * is never sent. The function keys are the guest's to spend as it likes --
+ * the driver's window switch is the use in view -- and this end takes no
+ * opinion on what any of these mean; it guarantees only that each is
+ * DISTINGUISHABLE: no other key, and no Alt chord (below), lands on them. */
 enum { ARROW_UP, ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT };
 
-static const uint8_t arrow_bytes[4][3] = {
-	{ 0x0C, 0x1C, 0x13 },	/* up */
-	{ 0x0A, 0x1A, 0x12 },	/* down */
-	{ 0x08, 0x18, 0x10 },	/* left */
-	{ 0x09, 0x19, 0x11 },	/* right */
+#define KEY_FN_BASE	0x80u	/* F1; F12 is $8B */
+#define KEY_ARROW_BASE	0x8Cu	/* plain up; + 4 Shift, + 8 Ctrl */
+
+enum : uint8_t {
+	CODE_HOME = 0x98, CODE_END = 0x99, CODE_PAGE_UP = 0x9A,
+	CODE_PAGE_DOWN = 0x9B, CODE_INSERT = 0x9D, CODE_DELETE = 0x9E,
 };
 
 static inline uint8_t
 arrow(int dir, bool shift, bool ctrl)
 {
-	return arrow_bytes[dir][shift ? 1 : ctrl ? 2 : 0];
+	return (uint8_t)(KEY_ARROW_BASE + (shift ? 4u : ctrl ? 8u : 0u) +
+	    (unsigned)dir);
 }
 
-/* The function keys reach the guest as $80-$8B, one per key, F1 first.
- *
- * They are for the guest to spend as it likes -- the driver's window switch
- * is the use in view -- and this end takes no opinion on what they mean. It
- * only guarantees they are DISTINGUISHABLE: nothing else this cooker emits
- * lands in $80-$8B, so a byte in that range came from a function key and
- * from nothing else. (The two high codes that are emitted, £ at $9C and ¬ at
- * $AA, sit well clear.)
- *
- * They were previously dropped, so this adds bytes to the stream that no
- * guest can already be relying on. */
-#define KEY_FN_BASE	0x80u
+/* ALT sets bit 7 on a printable result: $20-$7E become $A0-$FE. It is the
+ * CoCo3 convention (Level 2 vtio: "CC Negative bit set if key is an ALT key
+ * (high bit set in A)"), and either Alt key does it. It leaves alone what is
+ * not printable -- control characters, so CR, Esc, Backspace and Tab, and
+ * the Ctrl chords -- and what is already high: the special keys above, the
+ * pound $9C and the not sign $AA. So the special keys stay distinguishable
+ * from every Alt chord. The one overlap is deliberate: Alt-* is $AA, which
+ * is the not sign's byte and the same CP437 character. */
+#define KEY_ALT_BIT	0x80u
 
 enum : uint8_t {
-	MOD_LEFTCTRL = 0x01, MOD_LEFTSHIFT = 0x02,
-	MOD_RIGHTCTRL = 0x10, MOD_RIGHTSHIFT = 0x20,
+	MOD_LEFTCTRL = 0x01, MOD_LEFTSHIFT = 0x02, MOD_LEFTALT = 0x04,
+	MOD_RIGHTCTRL = 0x10, MOD_RIGHTSHIFT = 0x20, MOD_RIGHTALT = 0x40,
 };
 
 enum : uint8_t {
@@ -161,8 +166,26 @@ mod_text(uint8_t mod, char *buf, size_t n)
 static const char *
 byte_text(uint8_t c, char *buf, size_t n)
 {
+	static const char *const dir[4] = { "Up", "Down", "Left", "Right" };
+	static const char *const col[3] = { "", "Shift+", "Ctrl+" };
+
 	if (c >= KEY_FN_BASE && c <= KEY_FN_BASE + 11u)
 		snprintf(buf, n, "F%u", (unsigned)(c - KEY_FN_BASE + 1u));
+	else if (c >= KEY_ARROW_BASE && c < KEY_ARROW_BASE + 12u)
+		snprintf(buf, n, "%s%s", col[(c - KEY_ARROW_BASE) / 4u],
+		    dir[(c - KEY_ARROW_BASE) % 4u]);
+	else if (c == CODE_HOME)
+		snprintf(buf, n, "Home");
+	else if (c == CODE_END)
+		snprintf(buf, n, "End");
+	else if (c == CODE_PAGE_UP)
+		snprintf(buf, n, "PgUp");
+	else if (c == CODE_PAGE_DOWN)
+		snprintf(buf, n, "PgDn");
+	else if (c == CODE_INSERT)
+		snprintf(buf, n, "Ins");
+	else if (c == CODE_DELETE)
+		snprintf(buf, n, "Del (forward)");
 	else if (c == 0x0D)
 		snprintf(buf, n, "CR");
 	else if (c == 0x08)
@@ -178,9 +201,11 @@ byte_text(uint8_t c, char *buf, size_t n)
 	else if (c == 0x9C)
 		snprintf(buf, n, "pound (CP437)");
 	else if (c == 0xAA)
-		snprintf(buf, n, "not (CP437)");
+		snprintf(buf, n, "not (CP437) / Alt+'*'");
 	else if (c < 0x7F)
 		snprintf(buf, n, "'%c'", (char)c);
+	else if (c >= 0xA0 && c <= 0xFE)
+		snprintf(buf, n, "Alt+'%c'", (char)(c & 0x7F));
 	else
 		snprintf(buf, n, "-");
 	return buf;
@@ -190,7 +215,7 @@ byte_text(uint8_t c, char *buf, size_t n)
 static void
 echo_key(const char *event, uint8_t kc, uint8_t mod, int sent, const char *why)
 {
-	char m[64], b[24];
+	char m[64], b[32];
 
 	if (!echo_enabled)
 		return;
@@ -215,10 +240,10 @@ static uint8_t
 uk_cook(uint8_t kc, bool shift, bool ctrl, bool caps, bool num)
 {
 	/* The numeric keypad. With Num Lock on it types the same bytes as the
-	 * main keys; off, its 8/2/4/6 are the arrows, as on a PC. Its editing
-	 * keys (7 Home, 1 End, 9 PgUp, 3 PgDn, 0 Ins, . Del) send nothing,
-	 * like the dedicated ones: OS-9 has no convention for them yet. The
-	 * operators and Enter do not depend on Num Lock. */
+	 * main keys; off, its 8/2/4/6 are the arrows and 7/1/9/3/0/. the
+	 * editing keys (Home, End, PgUp, PgDn, Ins, Del), as on a PC, sending
+	 * what the dedicated keys send. 5 sends nothing. The operators and
+	 * Enter do not depend on Num Lock. */
 	if (kc >= KEY_KP_1 && kc <= KEY_KP_DOT) {
 		static const char numeric[] = "1234567890.";
 
@@ -229,6 +254,12 @@ uk_cook(uint8_t kc, bool shift, bool ctrl, bool caps, bool num)
 		case KEY_KP_2: return arrow(ARROW_DOWN, shift, ctrl);
 		case KEY_KP_4: return arrow(ARROW_LEFT, shift, ctrl);
 		case KEY_KP_6: return arrow(ARROW_RIGHT, shift, ctrl);
+		case KEY_KP_7: return CODE_HOME;
+		case KEY_KP_1: return CODE_END;
+		case KEY_KP_9: return CODE_PAGE_UP;
+		case KEY_KP_3: return CODE_PAGE_DOWN;
+		case KEY_KP_0: return CODE_INSERT;
+		case KEY_KP_DOT: return CODE_DELETE;
 		default:       return 0;
 		}
 	}
@@ -260,6 +291,13 @@ uk_cook(uint8_t kc, bool shift, bool ctrl, bool caps, bool num)
 	case KEY_DOWN:          return arrow(ARROW_DOWN, shift, ctrl);
 	case KEY_LEFT:          return arrow(ARROW_LEFT, shift, ctrl);
 	case KEY_RIGHT:         return arrow(ARROW_RIGHT, shift, ctrl);
+
+	case KEY_HOME:          return CODE_HOME;
+	case KEY_END:           return CODE_END;
+	case KEY_PAGE_UP:       return CODE_PAGE_UP;
+	case KEY_PAGE_DOWN:     return CODE_PAGE_DOWN;
+	case KEY_INSERT:        return CODE_INSERT;
+	case KEY_DELETE:        return CODE_DELETE;
 
 	case KEY_KP_SLASH:      return '/';
 	case KEY_KP_STAR:       return '*';
@@ -306,7 +344,8 @@ static bool    num_lock = true;	/* the PC's usual state at power-on */
  * key-down ends the current repeat (as on a PC), and a release ends it too.
  * Not repeated: Caps Lock, Num Lock, and the function keys -- the last are
  * the guest's to spend on things like switching windows, and a held F-key
- * cycling windows is not a feature. The arrows do repeat. A repeat produces what the key produces NOW, with the
+ * cycling windows is not a feature. The arrows and editing keys do repeat,
+ * as do Alt chords. A repeat produces what the key produces NOW, with the
  * modifiers of the latest report, so pressing Shift mid-repeat changes case.
  *
  * TIME IS PUSHED IN (hid_cook_tick), like the echo flag, so this file stays
@@ -329,12 +368,14 @@ static uint32_t rpt_due;	/* ms: next repeat due */
 
 /* What key `kc` produces with modifiers `mod`: the UK layout, then Ctrl
  * chords folded onto the C0 controls the shell's editing characters live
- * in. 0 for a key that produces nothing. */
+ * in, then Alt's bit 7 on whatever is still printable. 0 for a key that
+ * produces nothing. */
 static uint8_t
 cook_key(uint8_t kc, uint8_t mod)
 {
 	const bool shift = (mod & (MOD_LEFTSHIFT | MOD_RIGHTSHIFT)) != 0;
 	const bool ctrl  = (mod & (MOD_LEFTCTRL  | MOD_RIGHTCTRL))  != 0;
+	const bool alt   = (mod & (MOD_LEFTALT   | MOD_RIGHTALT))   != 0;
 	uint8_t c = uk_cook(kc, shift, ctrl, caps_lock, num_lock);
 
 	if (ctrl && c != 0) {
@@ -342,6 +383,8 @@ cook_key(uint8_t kc, uint8_t mod)
 		if (u >= 0x40 && u <= 0x5F)
 			c = (uint8_t)(u & 0x1F);
 	}
+	if (alt && c >= 0x20 && c <= 0x7E)
+		c = (uint8_t)(c | KEY_ALT_BIT);
 	return c;
 }
 
