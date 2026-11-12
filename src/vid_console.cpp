@@ -25,6 +25,7 @@
 #include <stdint.h>
 
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "video.h"
@@ -182,10 +183,46 @@ struct frame {
 struct window {
 	bool		defined;
 	int8_t		slot;		/* parked screen, or -1 for none */
+	uint8_t		top;		/* innermost overlay, or OVL_NONE */
+	uint8_t		lost;		/* OWSets refused, owed an OWEnd each */
 	struct frame	base;		/* the window's own text surface */
 };
 
 static struct window windows[WIN_MAX];
+
+/* OVERLAY WINDOWS (OWSet $22 / OWEnd $23), as CoCo 3 GrfDrv has them: a
+ * rectangle opened INSIDE a window that takes over its output until it is
+ * closed, nesting, each one a frame of its own -- its own cursor, colours,
+ * working area -- so that cursor addressing, clears and erases are all
+ * relative to it. Placed relative to the WINDOW's corner (GrfDrv measures
+ * against the device window, not the overlay beneath, and ignores CWArea),
+ * and clamped to it as DWSet is clamped to the panel, because this link has
+ * no error channel to refuse with.
+ *
+ * With the save switch on, the cells under the overlay are copied out when it
+ * opens and put back when it closes. The copy goes to a spare parked-screen
+ * slot in PSRAM -- the window store has room for more screens than there are
+ * windows -- so an overlay costs SRAM only for its record. TEXT is saved, not
+ * pixels: the graphics plane belongs to no window, and an overlay's text,
+ * being opaque, covers the drawing without changing it, so closing the
+ * overlay and redrawing the cells beneath brings the drawing back too.
+ *
+ * Records are a small pool shared by all windows, linked through `below`. */
+#define OVL_MAX		12u
+#define OVL_NONE	0xFFu
+
+struct overlay {
+	uint8_t		below;		/* the overlay underneath, or OVL_NONE */
+	int8_t		save;		/* slot holding what it covers, or -1 */
+	bool		want_save;	/* OWSet asked for the save switch */
+	struct frame	f;
+};
+
+static struct overlay ovl[OVL_MAX];
+static uint16_t ovl_used;		/* bit i: ovl[i] is in use */
+static uint16_t ovl_slots_used;		/* bit i: store slot i saves an overlay */
+static uint32_t stat_ovl_refused;	/* OWSets with no record free */
+static uint32_t stat_ovl_unsaved;	/* save switch on, nowhere to save */
 
 /* Two ideas that used to be one. Select chooses where text GOES; DWShow
  * chooses what is ON SCREEN. Conflating them means a background shell writing
@@ -201,11 +238,20 @@ target_is_visible(void)
 	return win_target == win_shown;
 }
 
+/* The frame a window's text goes to: its innermost overlay, if it has one. */
+static inline struct frame *
+frame_of(unsigned id)
+{
+	struct window *w = &windows[id];
+
+	return w->top == OVL_NONE ? &w->base : &ovl[w->top].f;
+}
+
 /* The frame text is written into: the Select target's. */
 static inline struct frame *
 tf(void)
 {
-	return &windows[win_target].base;
+	return frame_of(win_target);
 }
 
 static inline uint8_t
@@ -257,10 +303,13 @@ static int  win_row0;
 static int  win_cols = TEXT_COLS;
 static int  win_rows = TEXT_ROWS;
 
+/* The target is the whole panel, as a window rather than as an overlay: an
+ * overlay the size of the panel is still only covering it. */
 static inline bool
 win_is_root(void)
 {
-	return win_col0 == 0 && win_row0 == 0 &&
+	return tf() == &windows[win_target].base &&
+	    win_col0 == 0 && win_row0 == 0 &&
 	    win_cols == TEXT_COLS && win_rows == TEXT_ROWS;
 }
 
@@ -583,6 +632,8 @@ frame_init(struct frame *f, int x, int y, int cols, int rows, uint8_t fg,
 	f->flags = FR_PROTECT | FR_TRANSPARENT;
 }
 
+static void ovl_discard(struct window *w);
+
 static void
 win_define(unsigned id, int x, int y, int cols, int rows, uint8_t fg,
     uint8_t bg)
@@ -605,8 +656,196 @@ win_define(unsigned id, int x, int y, int cols, int rows, uint8_t fg,
 	if (w->slot >= 0 && (unsigned)w->slot >= win_store_slots())
 		w->slot = -1;		/* no store for this one */
 
+	ovl_discard(w);
 	w->defined = true;
 	frame_init(&w->base, x, y, cols, rows, fg, bg);
+}
+
+/* ── overlays ─────────────────────────────────────────────────────────── */
+
+/* A store slot for an overlay's save, or -1. The windows hold slots 0 to
+ * WIN_MAX - 2 (window id - 1); the rest of what the probe proved is spare. */
+static int
+ovl_slot_alloc(void)
+{
+	for (unsigned i = WIN_MAX - 1u; i < win_store_slots() && i < 16u; i++)
+		if ((ovl_slots_used & (1u << i)) == 0u) {
+			ovl_slots_used |= (uint16_t)(1u << i);
+			return (int)i;
+		}
+	return -1;
+}
+
+/* Copy an overlay's rectangle out of the target window's text into `buf`, or
+ * back from it, wherever that text lives: the live layer when the window is
+ * shown, its parked screen when it is not (laid out at the WINDOW's width).
+ * `buf` is laid out at the rectangle's own width. */
+static void
+ovl_copy(const struct frame *f, uint8_t *buf, bool restore)
+{
+	const struct frame *b = &windows[win_target].base;
+	const bool live = target_is_visible();
+	uint8_t *p = live ? NULL : target_backing();
+
+	if (buf == NULL || (!live && p == NULL))
+		return;			/* the window's text is going nowhere */
+	for (int r = 0; r < f->rows; r++) {
+		uint8_t *row = &buf[(size_t)r * f->cols * 2u];
+
+		if (live) {
+			if (restore)
+				vidterm_write_row(f->col0, f->row0 + r,
+				    f->cols, row);
+			else
+				vidterm_read_row(f->col0, f->row0 + r,
+				    f->cols, row);
+			continue;
+		}
+		uint8_t *at = &p[((size_t)(f->row0 + r - b->row0) *
+		    b->cols + (size_t)(f->col0 - b->col0)) * 2u];
+		if (restore)
+			memcpy(at, row, (size_t)f->cols * 2u);
+		else
+			memcpy(row, at, (size_t)f->cols * 2u);
+	}
+}
+
+/* Blank an overlay's rectangle in the target window's text, in `attr`. */
+static void
+ovl_fill(const struct frame *f, uint8_t attr)
+{
+	const struct frame *b = &windows[win_target].base;
+	uint8_t *p;
+
+	if (target_is_visible()) {
+		vidterm_clear_region(f->col0, f->row0, f->cols, f->rows, ' ',
+		    attr);
+		return;
+	}
+	if ((p = target_backing()) == NULL)
+		return;
+	for (int r = 0; r < f->rows; r++)
+		for (int c = 0; c < f->cols; c++) {
+			uint8_t *at = &p[((size_t)(f->row0 + r - b->row0) *
+			    b->cols + (size_t)(f->col0 + c - b->col0)) * 2u];
+
+			at[0] = ' ';
+			at[1] = attr;
+		}
+}
+
+/* Unlink a window's innermost overlay and free what it held, restoring
+ * nothing. */
+static void
+ovl_pop(struct window *w)
+{
+	struct overlay *o = &ovl[w->top];
+
+	if (o->save >= 0)
+		ovl_slots_used &= (uint16_t)~(1u << o->save);
+	ovl_used &= (uint16_t)~(1u << w->top);
+	w->top = o->below;
+}
+
+/* Forget every overlay a window has: it is being redefined or closed, and
+ * what was under its overlays goes with it. */
+static void
+ovl_discard(struct window *w)
+{
+	while (w->top != OVL_NONE)
+		ovl_pop(w);
+	w->lost = 0;
+}
+
+/* OWSet: save switch, x, y, width, height, foreground, background. */
+static void
+ovl_open(void)
+{
+	struct window *w = &windows[win_target];
+	const struct frame *b = &w->base;
+	int x = esc_buf[1], y = esc_buf[2];
+	int cols = esc_buf[3], rows = esc_buf[4];
+	unsigned i;
+
+	if (x > b->cols - 1) x = b->cols - 1;
+	if (y > b->rows - 1) y = b->rows - 1;
+	if (cols < 1) cols = 1;
+	if (rows < 1) rows = 1;
+	if (x + cols > b->cols) cols = b->cols - x;
+	if (y + rows > b->rows) rows = b->rows - y;
+
+	for (i = 0u; i < OVL_MAX; i++)
+		if ((ovl_used & (1u << i)) == 0u)
+			break;
+	if (i == OVL_MAX) {
+		/* Nothing to open it with. Its OWEnd must then close nothing,
+		 * not the overlay beneath, so the refusal is remembered. */
+		if (w->lost != 0xFFu)
+			w->lost++;
+		stat_ovl_refused++;
+		return;
+	}
+
+	win_stash_cursor();		/* the parent's, kept in its frame */
+	struct overlay *o = &ovl[i];
+	ovl_used |= (uint16_t)(1u << i);
+	frame_init(&o->f, b->col0 + x, b->row0 + y, cols, rows, esc_buf[5],
+	    esc_buf[6]);
+	/* GrfDrv copies the device window's switches, so protection and
+	 * inverse carry over. The text is OPAQUE whatever the window's is: an
+	 * overlay is there to cover what is beneath it, in its own background
+	 * colour, and a transparent one would show the drawing through it. */
+	o->f.flags = (uint8_t)(b->flags & (FR_PROTECT | FR_INVERSE));
+	o->below = w->top;
+	o->want_save = esc_buf[0] != 0u;
+	o->save = -1;
+	if (o->want_save) {
+		/* Saved, then cleared in the overlay's colours; with the switch
+		 * off GrfDrv does neither, and the overlay opens on whatever
+		 * was there. */
+		o->save = (int8_t)ovl_slot_alloc();
+		if (o->save >= 0)
+			ovl_copy(&o->f, win_store_slot((unsigned)o->save),
+			    false);
+		else
+			stat_ovl_unsaved++;
+		ovl_fill(&o->f, frame_attr(&o->f));
+		if (target_is_visible())
+			dirty = true;
+	}
+	w->top = (uint8_t)i;
+	win_adopt(win_target);		/* its view, its cursor: home */
+}
+
+/* OWEnd: close the target's innermost overlay. */
+static void
+ovl_close(void)
+{
+	struct window *w = &windows[win_target];
+
+	if (w->lost != 0u) {
+		w->lost--;		/* the one that never opened */
+		return;
+	}
+	if (w->top == OVL_NONE)
+		return;			/* GrfDrv errors; there is no channel */
+
+	const struct overlay *o = &ovl[w->top];
+	const struct frame covered = o->f;
+	const int save = o->save;
+	const bool want = o->want_save;
+
+	if (save >= 0)
+		ovl_copy(&covered, win_store_slot((unsigned)save), true);
+	ovl_pop(w);
+	/* Asked to save and could not: the area is cleared in the colours of
+	 * what is now on top rather than left showing the overlay. Without
+	 * the switch nothing is restored, as on a CoCo 3. */
+	if (save < 0 && want)
+		ovl_fill(&covered, frame_attr(tf()));
+	if (target_is_visible())
+		dirty = true;
+	win_adopt(win_target);		/* the parent's view and cursor */
 }
 
 static void
@@ -648,6 +887,12 @@ esc_exec(void)
 		win_adopt(id);
 		break;
 	}
+	case 0x22u:			/* OWSet: open an overlay */
+		ovl_open();
+		break;
+	case 0x23u:			/* OWEnd: close the innermost */
+		ovl_close();
+		break;
 	case 0x25u: {			/* CWArea: x, y, sx, sy — within the window */
 		struct frame *w = tf();
 		int x = esc_buf[0], y = esc_buf[1];
@@ -726,6 +971,7 @@ esc_exec(void)
 	case 0x24u:			/* DWEnd: close the target window */
 		if (win_target != 0u) {
 			const unsigned gone = win_target;
+			ovl_discard(&windows[gone]);
 			windows[gone].defined = false;
 			if (win_shown == gone) {
 				/* Its rectangle is nobody's now; blank it and
@@ -939,9 +1185,9 @@ esc_exec(void)
 			state = ST_ESC_SKIP;
 		break;
 	default:
-		/* Framed and deliberately inert: OWSet/OWEnd ($22/$23),
-		 * ScaleSw ($35) and the reserved slots. Their parameters were
-		 * consumed by the framing, so the stream stays in step. */
+		/* Framed and deliberately inert: ScaleSw ($35) and the
+		 * reserved slots. Their parameters were consumed by the
+		 * framing, so the stream stays in step. */
 		break;
 	}
 }
@@ -1349,8 +1595,13 @@ vid_link_consume_reset(void)
 	 * would hand out a zero-sized rectangle and somebody else's parked
 	 * screen. It owns no slot: when the root is selected its text is the
 	 * live layer, and it parks like any other only once it is not. */
-	for (unsigned i = 0u; i < WIN_MAX; i++)
+	for (unsigned i = 0u; i < WIN_MAX; i++) {
 		windows[i].defined = false;
+		windows[i].top = OVL_NONE;
+		windows[i].lost = 0u;
+	}
+	ovl_used = 0u;
+	ovl_slots_used = 0u;
 	windows[0].defined = true;
 	windows[0].slot = -1;
 	/* White on black in CoWin's palette: FColor 0, BColor 2. */
@@ -1374,4 +1625,18 @@ vid_link_consume_reset(void)
 	vidterm_select_cursor(0u, 0u);	/* and the built-in arrow */
 	vidterm_set_bold(false);
 	default_palette();
+}
+
+extern "C" void
+vid_link_consume_print_status(void)
+{
+	/* Silent while both are zero, which is the only good reading. */
+	if (stat_ovl_refused != 0u)
+		printf("             %lu overlays REFUSED -- all %u records in"
+		    " use\n", (unsigned long)stat_ovl_refused,
+		    (unsigned)OVL_MAX);
+	if (stat_ovl_unsaved != 0u)
+		printf("             %lu overlays opened UNSAVED -- no store"
+		    " slot; closing one clears it\n",
+		    (unsigned long)stat_ovl_unsaved);
 }

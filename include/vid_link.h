@@ -343,6 +343,10 @@ bool vid_link_consume_hold(void);
  * the framing went wrong, if it ever does. */
 uint8_t vid_link_consume_class(void);
 
+/* Print the consumer's own trouble counters for `status`, after the link's.
+ * Prints nothing when there is nothing wrong. */
+void vid_link_consume_print_status(void);
+
 #define VID_BYTE_START		0u	/* begins a command, or is plain text */
 #define VID_BYTE_SUBCODE	1u	/* the sub-code after $1B */
 #define VID_BYTE_PARAM		2u	/* a fixed parameter of a command */

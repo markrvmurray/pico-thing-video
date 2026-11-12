@@ -724,4 +724,5 @@ vid_link_print_status(void)
 		printf("             %lu console replies LOST — no room in"
 		       " the input FIFO\n",
 		       (unsigned long)stat_rx_replies_lost);
+	vid_link_consume_print_status();
 }
