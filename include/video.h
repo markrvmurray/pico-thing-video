@@ -51,14 +51,22 @@ void video_demo(void);
 #endif
 
 /* ── Text layer ─────────────────────────────────────────────────────────── */
-/* A cell's ATTRIBUTE byte: bits 7-5 foreground R,G,B (full intensity), bits
- * 3-1 background R,G,B (lower intensity), bit 0 transparent background
- * (restore the graphics plane there), and bit 4 INVERSE -- the glyph's mask
+/* A cell's ATTRIBUTE byte: bits 7-5 the foreground COLOUR INDEX and bits 3-1
+ * the background's (0-7 each, drawn in the colours vidterm_text_colours()
+ * sets), bit 0 transparent background (restore the graphics plane there), and
+ * bit 4 INVERSE -- the glyph's mask
  * is inverted, so the cell is foreground and the glyph shows the background
  * through it: true reverse video, over graphics as well. That was the last
  * free bit; underline and blink have none (the grid is 3,840 bytes of SRAM
  * per extra attribute byte, which the budget does not have). */
 #define VIDTERM_ATTR_INVERSE	0x10u
+
+/* What the attribute's eight foreground and eight background indices are drawn
+ * in, as RGB332. Text already on screen takes the new colours (every cell is
+ * marked dirty when anything changed; returns whether it did). NULL for either
+ * restores the built-in table, which reads an index as R,G,B bits -- bright
+ * for the foreground, dim for the background. */
+bool vidterm_text_colours(const uint8_t *fg, const uint8_t *bg);
 
 void vidterm_putch(int col, int row, uint8_t ch, uint8_t attr);
 void vidterm_puts(int col, int row, const char *s, uint8_t attr);

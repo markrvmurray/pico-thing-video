@@ -31,21 +31,14 @@
 #include "vid_link.h"
 #include "win_store.h"
 
-/* White foreground on an OPAQUE black background: console overwrites and
- * scrolls must erase what was under them. (Transparent attrs are for the
- * M3+ text-over-graphics modes.) */
-/* White on TRANSPARENT. Transparent no longer means "skip the pixel" -- the
- * renderer restores the graphics plane there instead -- so text erases
- * correctly and whatever is drawn underneath shows through the gaps in each
- * glyph. Opaque black was hiding graphics, and doing it so thoroughly that a
- * correctly drawn box once looked like a broken feature. */
-#define CONSOLE_ATTR_BASE  0xE0u
-/* The attribute text is written with: the console's base, plus inverse when
- * the TARGET window has it on ($1F $20) -- per window, as GrfDrv keeps it in
- * its window table, and applying to erases as well as glyphs, since GrfDrv
- * rewrites the window's default attribute. */
-#define CONSOLE_ATTR       ((uint8_t)(console_attr | \
-    (windows[win_target].inverse ? VIDTERM_ATTR_INVERSE : 0u)))
+/* The attribute text is written with comes from the target's frame: its
+ * foreground and background PALETTE REGISTERS (FColor/BColor, or DWSet's),
+ * kept as GrfDrv keeps them in a hardware-text attribute -- three bits each,
+ * the foreground drawn from registers 8-15 and the background from 0-7 (see
+ * text_colours_push()) -- plus inverse ($1F $20) and transparency (TCharSw).
+ * Per frame, as GrfDrv keeps them in its window table, and applying to erases
+ * as well as glyphs, since an erase writes the window's default attribute. */
+#define CONSOLE_ATTR	text_attr()
 
 /* Multi-byte control sequences ($02 x y cursor position, $05 arg cursor
  * on/off) collect their parameter bytes through this little machine. */
@@ -119,8 +112,6 @@ static bool     load_ok;		/* header understood; otherwise drop */
 /* ── graphics state ── */
 static int      dp_x, dp_y;		/* the draw pointer */
 static uint8_t  palette[16];		/* palette registers, stored as RGB332 */
-static uint8_t  fcolor_reg;		/* foreground palette register index */
-static uint8_t  bcolor_reg;
 
 /* colourValue on the wire is the CoCo3 GIME 6-bit RGB byte: bit5=R1
  * bit4=G1 bit3=B1 bit2=R0 bit1=G0 bit0=B0. Expand each 2-bit channel
@@ -135,22 +126,22 @@ gime_to_332(uint8_t v)
 	return (uint8_t)((two_to_three[r] << 5) | (two_to_three[g] << 2) | b);
 }
 
+/* DefPal: CoWin's default palette (level2/coco3/modules/cowin.asm, L02F3):
+ * white, blue, black, green, red, yellow, magenta, cyan, the same eight in
+ * registers 8-15. A guest written for a CoCo 3 that never loads a palette
+ * expects exactly these -- DynaStar's FColor 0 / BColor 1 is white on blue.
+ * DefPal resets the registers only; it leaves every window's FColor and
+ * BColor alone, as on a CoCo 3. */
 static void
 default_palette(void)
 {
-	/* RGBI-flavoured placeholder defaults (0-7 bright BGR order per the
-	 * GIME bit pairs, 8-15 dim): guests programme what they need via
-	 * Palette; refine to grfdrv's exact table when compatibility work
-	 * starts. */
-	static const uint8_t defs[16] = {
-		0, 9, 18, 27, 36, 45, 54, 63,
-		0, 1,  2,  3,  4,  5,  6,  7
+	static const uint8_t defs[8] = {
+		0x3F, 0x09, 0x00, 0x12, 0x24, 0x36, 0x2D, 0x1B
 	};
 	for (int i = 0; i < 16; i++)
-		palette[i] = gime_to_332(defs[i]);
-	fcolor_reg = 7;			/* white */
-	bcolor_reg = 0;			/* black */
+		palette[i] = gime_to_332(defs[i & 7]);
 }
+
 /* The window table. Entry 0 is the root and is never allocated a parked
  * screen: the root's text IS the live layer whenever it is selected, and when
  * it is not, it parks like any other. Identity is the guest's to choose, so
@@ -158,27 +149,40 @@ default_palette(void)
  * table simply does not exist, which the read-back reports. */
 #define WIN_MAX		8u
 
-struct window {
-	bool	defined;
-	int	col0, row0, cols, rows;	/* clamped to the panel at DWSet */
-	/* The WORKING AREA: a sub-rectangle of the window, relative to its
+/* A FRAME is one level of text surface: what a window's text is written into,
+ * where its cursor is, and how its text is drawn. Every window has one, and
+ * everything the text and graphics code below needs to know about "the window
+ * being written to" is in it, reached through tf().
+ *
+ * Bytes throughout, because the panel is 128 x 30 cells, and that is what pays
+ * for the table: eight windows of ints cost 448 bytes of SRAM that is nearly
+ * gone; these cost 128. Arithmetic is still done in int -- the fields only
+ * STORE the numbers. */
+struct frame {
+	uint8_t	col0, row0, cols, rows;	/* the rectangle, in panel cells */
+	/* The WORKING AREA: a sub-rectangle of the frame, relative to its
 	 * corner, that text and graphics are actually confined to. CWArea
-	 * narrows it; DWSet resets it to the whole window. Kept separately
-	 * from the window's own geometry so narrowing is reversible and a
+	 * narrows it; defining the frame resets it to the whole. Kept apart
+	 * from the frame's own geometry so narrowing is reversible and a
 	 * switch restores what the window had. */
-	int	wa_col, wa_row, wa_cols, wa_rows;
-	bool	protect;		/* false: graphics may leave the window */
-	int	cur_col, cur_row;	/* cursor WITHIN the window */
-	int	slot;			/* parked screen, or -1 for none */
-	bool	inverse;		/* $1F $20/$21: reverse video */
-	/* ESC 7 / ESC 8 (DECSC/DECRC). Per window, not one slot for the
+	uint8_t	wa_col, wa_row, wa_cols, wa_rows;
+	uint8_t	cur_col, cur_row;	/* cursor WITHIN the working area */
+	/* ESC 7 / ESC 8 (DECSC/DECRC). Per frame, not one slot for the
 	 * console: several windows share this one stream, so a single slot
-	 * would let a background shell's save clobber the foreground's.
-	 * Bytes, since a window is at most 128 x 30 cells, and placed after
-	 * the bool so they sit in padding the struct already had: between
-	 * the ints they cost four bytes a window in SRAM that is nearly
-	 * gone. */
+	 * would let a background shell's save clobber the foreground's. */
 	uint8_t	saved_col, saved_row;
+	uint8_t	fg, bg;			/* palette registers, FColor / BColor */
+	uint8_t	flags;			/* FR_* below */
+};
+
+#define FR_PROTECT	0x01u	/* graphics confined to the frame (DWProtSw) */
+#define FR_INVERSE	0x02u	/* $1F $20/$21: reverse video */
+#define FR_TRANSPARENT	0x04u	/* TCharSw: the graphics plane shows behind */
+
+struct window {
+	bool		defined;
+	int8_t		slot;		/* parked screen, or -1 for none */
+	struct frame	base;		/* the window's own text surface */
 };
 
 static struct window windows[WIN_MAX];
@@ -195,6 +199,38 @@ static inline bool
 target_is_visible(void)
 {
 	return win_target == win_shown;
+}
+
+/* The frame text is written into: the Select target's. */
+static inline struct frame *
+tf(void)
+{
+	return &windows[win_target].base;
+}
+
+static inline uint8_t
+frame_attr(const struct frame *f)
+{
+	return (uint8_t)(((f->fg & 7u) << 5) | ((f->bg & 7u) << 1) |
+	    ((f->flags & FR_TRANSPARENT) != 0u ? 0x01u : 0u) |
+	    ((f->flags & FR_INVERSE) != 0u ? VIDTERM_ATTR_INVERSE : 0u));
+}
+
+static inline uint8_t
+text_attr(void)
+{
+	return frame_attr(tf());
+}
+
+/* Tell the renderer what the attribute's colour indices are, from the
+ * palette: the foreground from registers 8-15 and the background from 0-7,
+ * as the GIME draws hardware text. Text already on screen takes the change
+ * -- a CoCo 3 recolours its text when the palette changes, and so does this.
+ * Returns whether anything changed. */
+static bool
+text_colours_push(void)
+{
+	return vidterm_text_colours(&palette[8], &palette[0]);
 }
 
 /* The target window's parked screen, or NULL when it has none (the root
@@ -216,8 +252,6 @@ target_backing(void)
  * The root window is the whole panel, which is what makes this safe to land
  * before any window can be created: with these at their initial values every
  * operation reduces to exactly what it did before. */
-static uint8_t console_attr = CONSOLE_ATTR_BASE | 0x01u;
-
 static int  win_col0;
 static int  win_row0;
 static int  win_cols = TEXT_COLS;
@@ -244,7 +278,7 @@ win_is_root(void)
 static uint8_t *
 backing_cell(int col, int row)
 {
-	const struct window *w = &windows[win_target];
+	const struct frame *w = &windows[win_target].base;
 	uint8_t *p = target_backing();
 
 	if (p == NULL || col < 0 || col >= win_cols ||
@@ -377,7 +411,7 @@ clear_all(void)
 		 * painting pixels that are about to be painted again. Fill it
 		 * only when the text will NOT cover it. */
 		if (!vidterm_clear(' ', CONSOLE_ATTR))
-			vidterm_clear_graphics(palette[bcolor_reg & 0x0Fu]);
+			vidterm_clear_graphics(palette[tf()->bg & 0x0Fu]);
 	} else {
 		surface_clear(0, 0, win_cols, win_rows);
 	}
@@ -390,6 +424,7 @@ clear_all(void)
 static void
 claim_screen(void)
 {
+	(void)text_colours_push();	/* the power-on screen used its own */
 	clear_all();
 	claimed = true;
 	vidterm_cursor_enable(cursor_shown);
@@ -426,11 +461,13 @@ s16(int i)
  * one grid, not a grid of its own: its rows are not contiguous, so there is
  * nothing to repoint. */
 static void
-win_park(const struct window *w)
+win_park(const struct window *win)
 {
-	if (w->slot < 0)
+	const struct frame *w = &win->base;
+
+	if (win->slot < 0)
 		return;
-	uint8_t *p = win_store_slot((unsigned)w->slot);
+	uint8_t *p = win_store_slot((unsigned)win->slot);
 	if (p == NULL)
 		return;
 	for (int r = 0; r < w->rows; r++)
@@ -439,15 +476,19 @@ win_park(const struct window *w)
 }
 
 static void
-win_unpark(const struct window *w)
+win_unpark(const struct window *win)
 {
-	uint8_t *p = w->slot < 0 ? NULL : win_store_slot((unsigned)w->slot);
+	const struct frame *w = &win->base;
+	uint8_t *p = win->slot < 0 ? NULL :
+	    win_store_slot((unsigned)win->slot);
 
 	if (p == NULL) {
 		/* Never parked, or no store: show it empty rather than
-		 * showing whatever the previous window left behind. */
+		 * showing whatever the previous window left behind -- empty
+		 * in ITS colours, not the Select target's, which may be some
+		 * other window altogether. */
 		vidterm_clear_region(w->col0, w->row0, w->cols, w->rows,
-		    ' ', CONSOLE_ATTR);
+		    ' ', frame_attr(w));
 		return;
 	}
 	for (int r = 0; r < w->rows; r++)
@@ -465,7 +506,7 @@ win_unpark(const struct window *w)
 static void
 win_apply_view(void)
 {
-	const struct window *w = &windows[win_target];
+	const struct frame *w = tf();
 
 	win_col0 = w->col0 + w->wa_col;
 	win_row0 = w->row0 + w->wa_row;
@@ -477,7 +518,7 @@ win_apply_view(void)
 	 * lands, not which surface it lands on, so drawing survives any
 	 * window switch exactly as it did before. */
 	vidterm_set_origin(win_col0 * CHAR_W, win_row0 * CHAR_H);
-	if (w->protect)
+	if ((w->flags & FR_PROTECT) != 0u)
 		vidterm_set_clip(win_col0 * CHAR_W, win_row0 * CHAR_H,
 		    win_cols * CHAR_W, win_rows * CHAR_H);
 	else
@@ -499,24 +540,52 @@ static void
 win_adopt(unsigned id)
 {
 	win_target = id;
-	cur_col = windows[id].cur_col;
-	cur_row = windows[id].cur_row;
+	cur_col = tf()->cur_col;
+	cur_row = tf()->cur_row;
 	win_apply_view();
 }
 
 static void
 win_stash_cursor(void)
 {
-	windows[win_target].cur_col = cur_col;
-	windows[win_target].cur_row = cur_row;
+	tf()->cur_col = (uint8_t)cur_col;
+	tf()->cur_row = (uint8_t)cur_row;
 }
 
 /* Clamp a requested rectangle to the panel. The guest is TOLD what it got
  * rather than refused: a clamped window stays usable, and VID.Info reports
  * the geometry actually built, so the guest's hit-testing cannot drift from
  * ours. Refusing would need an error channel this link does not have. */
+/* Set a frame to a fresh rectangle: working area the whole of it, cursor and
+ * saved cursor home, graphics protected, plain video. */
 static void
-win_define(unsigned id, int x, int y, int cols, int rows)
+frame_init(struct frame *f, int x, int y, int cols, int rows, uint8_t fg,
+    uint8_t bg)
+{
+	f->col0 = (uint8_t)x;
+	f->row0 = (uint8_t)y;
+	f->cols = (uint8_t)cols;
+	f->rows = (uint8_t)rows;
+	f->wa_col = 0;
+	f->wa_row = 0;
+	f->wa_cols = (uint8_t)cols;
+	f->wa_rows = (uint8_t)rows;
+	f->cur_col = 0;
+	f->cur_row = 0;
+	f->saved_col = 0;		/* ESC 8 before any ESC 7 homes */
+	f->saved_row = 0;
+	f->fg = fg & 0x0Fu;
+	f->bg = bg & 0x0Fu;
+	/* Graphics contained; text TRANSPARENT, showing the graphics plane
+	 * behind it, so that erasing text puts a drawing back. A CoCo 3
+	 * starts opaque; this console has drawn transparent text since the
+	 * graphics shadow made that possible. */
+	f->flags = FR_PROTECT | FR_TRANSPARENT;
+}
+
+static void
+win_define(unsigned id, int x, int y, int cols, int rows, uint8_t fg,
+    uint8_t bg)
 {
 	struct window *w = &windows[id];
 
@@ -532,38 +601,26 @@ win_define(unsigned id, int x, int y, int cols, int rows)
 	/* A slot is claimed once and kept: redefining a window's geometry must
 	 * not leak the screen it was already using. */
 	if (!w->defined)
-		w->slot = (id == 0u) ? -1 : (int)(id - 1u);
+		w->slot = (int8_t)((id == 0u) ? -1 : (int)(id - 1u));
 	if (w->slot >= 0 && (unsigned)w->slot >= win_store_slots())
 		w->slot = -1;		/* no store for this one */
 
 	w->defined = true;
-	w->col0 = x;
-	w->row0 = y;
-	w->cols = cols;
-	w->rows = rows;
-	w->wa_col = 0;
-	w->wa_row = 0;
-	w->wa_cols = cols;
-	w->wa_rows = rows;
-	w->protect = true;		/* windows contain their own drawing */
-	w->inverse = false;		/* a (re)defined window starts plain */
-	w->cur_col = 0;
-	w->cur_row = 0;
-	w->saved_col = 0;		/* ESC 8 before any ESC 7 homes */
-	w->saved_row = 0;
+	frame_init(&w->base, x, y, cols, rows, fg, bg);
 }
 
 static void
 esc_exec(void)
 {
-	const uint8_t fg = palette[fcolor_reg & 0x0Fu];
+	const uint8_t fg = palette[tf()->fg & 0x0Fu];
 
 	switch (esc_op) {
 	case 0x20u: {			/* DWSet: id, type, x, y, sx, sy, fg, bg */
 		const unsigned id = esc_buf[0];
 		if (id >= WIN_MAX)
 			break;		/* no such window; read-back says so */
-		win_define(id, esc_buf[2], esc_buf[3], esc_buf[4], esc_buf[5]);
+		win_define(id, esc_buf[2], esc_buf[3], esc_buf[4], esc_buf[5],
+		    esc_buf[6], esc_buf[7]);
 		/* Defining a window makes it current, as it does on a CoCo3
 		 * where DWSet acts on the path it arrived on. */
 		win_stash_cursor();
@@ -592,7 +649,7 @@ esc_exec(void)
 		break;
 	}
 	case 0x25u: {			/* CWArea: x, y, sx, sy — within the window */
-		struct window *w = &windows[win_target];
+		struct frame *w = tf();
 		int x = esc_buf[0], y = esc_buf[1];
 		int cw = esc_buf[2], ch = esc_buf[3];
 
@@ -608,10 +665,10 @@ esc_exec(void)
 		if (x + cw > w->cols) cw = w->cols - x;
 		if (y + ch > w->rows) ch = w->rows - y;
 
-		w->wa_col = x;
-		w->wa_row = y;
-		w->wa_cols = cw;
-		w->wa_rows = ch;
+		w->wa_col = (uint8_t)x;
+		w->wa_row = (uint8_t)y;
+		w->wa_cols = (uint8_t)cw;
+		w->wa_rows = (uint8_t)ch;
 		win_apply_view();	/* re-derive the coordinate model */
 		cur_col = 0;		/* a new area starts at its own corner */
 		cur_row = 0;
@@ -625,14 +682,14 @@ esc_exec(void)
 		 * query (ESC 7, ESC [ 999;999 H, ESC [ 6 n, ESC 8), which has
 		 * to leave the cursor where it found it -- and any VT100
 		 * program that saves and restores around a status line. */
-		windows[win_target].saved_col = (uint8_t)cur_col;
-		windows[win_target].saved_row = (uint8_t)cur_row;
+		tf()->saved_col = (uint8_t)cur_col;
+		tf()->saved_row = (uint8_t)cur_row;
 		break;
 	case 0x38u:			/* ESC 8: restore the cursor (DECRC) */
 		/* Clamped, because CWArea may have narrowed the working area
 		 * since the save. Before any save it homes, as a VT100 does. */
-		cur_col = windows[win_target].saved_col;
-		cur_row = windows[win_target].saved_row;
+		cur_col = tf()->saved_col;
+		cur_row = tf()->saved_row;
 		if (cur_col >= win_cols)
 			cur_col = win_cols - 1;
 		if (cur_row >= win_rows)
@@ -644,7 +701,10 @@ esc_exec(void)
 		 * unprotected text would have no edge to wrap at and no region
 		 * to scroll. A CoCo3 protects the boundary generally; here the
 		 * switch means what it can usefully mean. */
-		windows[win_target].protect = esc_buf[0] != 0u;
+		if (esc_buf[0] != 0u)
+			tf()->flags |= FR_PROTECT;
+		else
+			tf()->flags &= (uint8_t)~FR_PROTECT;
 		win_apply_view();	/* view only: the cursor is not its business */
 		break;
 	case 0x26u: {			/* DWShow: id — VISIBILITY only */
@@ -670,9 +730,10 @@ esc_exec(void)
 			if (win_shown == gone) {
 				/* Its rectangle is nobody's now; blank it and
 				 * fall back to the root, which always exists. */
-				vidterm_clear_region(windows[gone].col0,
-				    windows[gone].row0, windows[gone].cols,
-				    windows[gone].rows, ' ', CONSOLE_ATTR);
+				const struct frame *g = &windows[gone].base;
+
+				vidterm_clear_region(g->col0, g->row0, g->cols,
+				    g->rows, ' ', CONSOLE_ATTR);
 				win_shown = 0u;
 				win_unpark(&windows[0]);
 				dirty = true;
@@ -682,15 +743,22 @@ esc_exec(void)
 		break;
 	case 0x30u:			/* DefPal */
 		default_palette();
+		if (text_colours_push())
+			dirty = true;		/* recolour what is on screen */
 		break;
 	case 0x31u:			/* Palette: register, 6-bit colourValue */
 		palette[esc_buf[0] & 0x0Fu] = gime_to_332(esc_buf[1] & 0x3Fu);
+		if (text_colours_push())
+			dirty = true;
 		break;
-	case 0x32u:			/* FColor: register index */
-		fcolor_reg = esc_buf[0] & 0x0Fu;
+	case 0x32u:			/* FColor: register, for text and drawing */
+		/* The window's, as on a CoCo 3: the colour primitives draw in
+		 * and the colour its text is written in from now on. Text
+		 * already written keeps the colour it was written in. */
+		tf()->fg = esc_buf[0] & 0x0Fu;
 		break;
-	case 0x33u:			/* BColor: register index */
-		bcolor_reg = esc_buf[0] & 0x0Fu;
+	case 0x33u:			/* BColor: register */
+		tf()->bg = esc_buf[0] & 0x0Fu;
 		break;
 	case 0x40u:			/* SetDPtr */
 		dp_x = p16(0);
@@ -757,9 +825,10 @@ esc_exec(void)
 		 * guest ask for the opaque behaviour back, which is what it
 		 * wants if it is about to overwrite a busy screen and does
 		 * not care what was underneath. */
-		console_attr = esc_buf[0] != 0u ?
-		    (uint8_t)(CONSOLE_ATTR_BASE | 0x01u) :
-		    (uint8_t)(CONSOLE_ATTR_BASE & ~0x01u);
+		if (esc_buf[0] != 0u)
+			tf()->flags |= FR_TRANSPARENT;
+		else
+			tf()->flags &= (uint8_t)~FR_TRANSPARENT;
 		break;
 	case 0x3Du:			/* Bold: on/off */
 		vidterm_set_bold(esc_buf[0] != 0u);
@@ -1023,6 +1092,12 @@ vid_link_consume_begin(void)
 	 * so a glyph or graphics primitive landing on it would be undone when
 	 * the saved pixels were put back. */
 	vidterm_cursor_hide();
+	/* The colours are the console's to say. Anything else that drives
+	 * the renderer directly -- the self-test, a test harness -- may have
+	 * left its own; asserting ours each pass costs a 16-byte compare, and
+	 * a change recolours the screen as a Palette would. */
+	if (claimed && text_colours_push())
+		dirty = true;
 }
 
 extern "C" void
@@ -1121,8 +1196,8 @@ vid_link_consume(uint8_t b)
 		 * desynchronise the stream. */
 		state = ST_NORMAL;
 		switch (b) {
-		case 0x20u: windows[win_target].inverse = true;  break;
-		case 0x21u: windows[win_target].inverse = false; break;
+		case 0x20u: tf()->flags |= FR_INVERSE; break;
+		case 0x21u: tf()->flags &= (uint8_t)~FR_INVERSE; break;
 		case 0x30u: surface_line(true);  break;	/* insert line */
 		case 0x31u: surface_line(false); break;	/* delete line */
 		/* $22/$23 underline and $24/$25 blink: accepted and
@@ -1277,21 +1352,9 @@ vid_link_consume_reset(void)
 	for (unsigned i = 0u; i < WIN_MAX; i++)
 		windows[i].defined = false;
 	windows[0].defined = true;
-	windows[0].col0 = 0;
-	windows[0].row0 = 0;
-	windows[0].cols = TEXT_COLS;
-	windows[0].rows = TEXT_ROWS;
-	windows[0].wa_col = 0;
-	windows[0].wa_row = 0;
-	windows[0].wa_cols = TEXT_COLS;
-	windows[0].wa_rows = TEXT_ROWS;
-	windows[0].protect = true;
-	windows[0].cur_col = 0;
-	windows[0].cur_row = 0;
-	windows[0].saved_col = 0;
-	windows[0].saved_row = 0;
 	windows[0].slot = -1;
-	windows[0].inverse = false;
+	/* White on black in CoWin's palette: FColor 0, BColor 2. */
+	frame_init(&windows[0].base, 0, 0, TEXT_COLS, TEXT_ROWS, 0u, 2u);
 	win_shown = 0u;
 	win_adopt(0u);
 
@@ -1310,6 +1373,5 @@ vid_link_consume_reset(void)
 	vidterm_select_font(0u, 0u);	/* the built-in face */
 	vidterm_select_cursor(0u, 0u);	/* and the built-in arrow */
 	vidterm_set_bold(false);
-	console_attr = CONSOLE_ATTR_BASE | 0x01u;
 	default_palette();
 }

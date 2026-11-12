@@ -56,23 +56,36 @@ static inline uint8_t rgb332(uint8_t r, uint8_t g, uint8_t b)
     return ((r & 0x07) << 5) | ((g & 0x07) << 2) | (b & 0x03);
 }
 
+/* The text COLOURS: what each of the attribute's eight foreground and eight
+ * background indices is drawn in. Looked up at blit time, so changing a colour
+ * here recolours text already on screen -- what the CoCo 3's palette does to
+ * its hardware text, and what the console relies on to follow the guest's
+ * Palette. Until somebody sets them they hold the built-in table below, which
+ * reads the index as R,G,B bits: the meaning the attribute had before the
+ * tables existed, which the power-on screen and the self-test still use. */
+static const uint8_t text_fg_builtin[8] = {	/* R,G,B bits, bright */
+    0x00, 0x03, 0x1C, 0x1F, 0xE0, 0xE3, 0xFC, 0xFF,
+};
+static const uint8_t text_bg_builtin[8] = {	/* R,G,B bits, dim */
+    0x00, 0x01, 0x08, 0x09, 0x40, 0x41, 0x48, 0x49,
+};
+static uint8_t text_fg_rgb[8] = {
+    0x00, 0x03, 0x1C, 0x1F, 0xE0, 0xE3, 0xFC, 0xFF,
+};
+static uint8_t text_bg_rgb[8] = {
+    0x00, 0x01, 0x08, 0x09, 0x40, 0x41, 0x48, 0x49,
+};
+
 static inline uint8_t attr_to_fg(uint8_t attr)
 {
-    uint8_t r = (attr >> 7) & 1;
-    uint8_t g = (attr >> 6) & 1;
-    uint8_t b = (attr >> 5) & 1;
-    return rgb332(r ? 7 : 0, g ? 7 : 0, b ? 3 : 0);
+    return text_fg_rgb[attr >> 5];
 }
 
 static inline uint8_t attr_to_bg(uint8_t attr)
 {
-    uint8_t r = (attr >> 3) & 1;
-    uint8_t g = (attr >> 2) & 1;
-    uint8_t b = (attr >> 1) & 1;
-
     if (attr & 0x01) return TRANSPARENT_BG;
 
-    return rgb332(r ? 2 : 0, g ? 2 : 0, b ? 1 : 0);
+    return text_bg_rgb[(attr >> 1) & 7u];
 }
 
 /* ─────────────────────────────── 8×16 font ─────────────────────────────── */
@@ -864,6 +877,31 @@ void vidterm_puts(int col, int row, const char *s, uint8_t attr)
 }
 
 static void mark_dirty_span(int row, int col, int cols);
+
+bool vidterm_text_colours(const uint8_t *fg, const uint8_t *bg)
+{
+    uint8_t f[8], b[8];
+
+    if (fg == NULL || bg == NULL) {
+        fg = text_fg_builtin;
+        bg = text_bg_builtin;
+    }
+    for (unsigned i = 0; i < 8u; i++) {
+        f[i] = fg[i];
+        b[i] = bg[i];
+    }
+    if (memcmp(f, text_fg_rgb, sizeof(f)) == 0 &&
+        memcmp(b, text_bg_rgb, sizeof(b)) == 0)
+        return false;
+    memcpy(text_fg_rgb, f, sizeof(f));
+    memcpy(text_bg_rgb, b, sizeof(b));
+    /* Every cell may be drawn in a changed colour. A whole-screen redraw,
+     * but through the dirty map, so the guest's bounded refresh spreads it
+     * over passes like any other. */
+    for (int r = 0; r < TEXT_ROWS; r++)
+        mark_dirty_span(r, 0, TEXT_COLS);
+    return true;
+}
 
 /* Mark cols [col, col+cols) of one row dirty. Rows are tracked as a bitmap a
  * word at a time, so a region has to set bits rather than whole words -- the
