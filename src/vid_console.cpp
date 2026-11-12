@@ -230,6 +230,31 @@ win_is_root(void)
 	    win_cols == TEXT_COLS && win_rows == TEXT_ROWS;
 }
 
+/* A cell of the target's PARKED screen, addressed in working-area
+ * coordinates, or NULL when it has no parked screen or the cell is outside the
+ * working area.
+ *
+ * The parked screen is laid out as the WHOLE WINDOW -- win_park() copies the
+ * window's rectangle row by row at the window's own width -- while text is
+ * addressed relative to the working area, which CWArea may have moved in from
+ * the window's corner and narrowed. So the working-area position is turned
+ * back into a panel position and then into the window's. Indexing the parked
+ * screen with the working area's width put text written to a hidden,
+ * narrowed window in the wrong cells. */
+static uint8_t *
+backing_cell(int col, int row)
+{
+	const struct window *w = &windows[win_target];
+	uint8_t *p = target_backing();
+
+	if (p == NULL || col < 0 || col >= win_cols ||
+	    row < 0 || row >= win_rows)
+		return NULL;
+	const size_t wc = (size_t)(win_col0 + col - w->col0);
+	const size_t wr = (size_t)(win_row0 + row - w->row0);
+	return &p[(wr * (size_t)w->cols + wc) * 2u];
+}
+
 /* Write a cell in WINDOW coordinates. The single place the origin is added,
  * so nothing below has to remember to do it. */
 static inline void
@@ -239,12 +264,24 @@ put_cell(int col, int row, uint8_t ch, uint8_t attr)
 		vidterm_putch(win_col0 + col, win_row0 + row, ch, attr);
 		return;
 	}
-	uint8_t *p = target_backing();
-	if (p == NULL || col < 0 || col >= win_cols ||
-	    row < 0 || row >= win_rows)
+	uint8_t *c = backing_cell(col, row);
+	if (c == NULL)
 		return;
-	p[((size_t)row * (size_t)win_cols + (size_t)col) * 2u] = ch;
-	p[((size_t)row * (size_t)win_cols + (size_t)col) * 2u + 1u] = attr;
+	c[0] = ch;
+	c[1] = attr;
+}
+
+/* Copy working-area row `from` over row `to` in the parked screen. A row of
+ * the working area is contiguous there, but consecutive rows are a WINDOW's
+ * width apart, so a region moves a row at a time. */
+static void
+backing_row_copy(int to, int from)
+{
+	uint8_t *d = backing_cell(0, to);
+	const uint8_t *s = backing_cell(0, from);
+
+	if (d != NULL && s != NULL)
+		memmove(d, s, (size_t)win_cols * 2u);
 }
 
 /* Scroll and clear have to work on whichever surface the target lives on.
@@ -275,11 +312,8 @@ surface_scroll(void)
 			    win_rows, ' ', CONSOLE_ATTR);
 		return;
 	}
-	uint8_t *p = target_backing();
-	if (p == NULL)
-		return;
-	const size_t stride = (size_t)win_cols * 2u;
-	memmove(p, p + stride, stride * (size_t)(win_rows - 1));
+	for (int r = 0; r < win_rows - 1; r++)
+		backing_row_copy(r, r + 1);
 	for (int c = 0; c < win_cols; c++)
 		put_cell(c, win_rows - 1, ' ', CONSOLE_ATTR);
 }
@@ -308,15 +342,12 @@ surface_line(bool insert)
 			    win_cols, n, ' ', CONSOLE_ATTR);
 		return;
 	}
-	uint8_t *p = target_backing();
-	if (p == NULL)
-		return;
-	const size_t stride = (size_t)win_cols * 2u;
-	uint8_t *const at = p + (size_t)cur_row * stride;
 	if (insert)
-		memmove(at + stride, at, stride * (size_t)(n - 1));
+		for (int r = win_rows - 1; r > cur_row; r--)
+			backing_row_copy(r, r - 1);
 	else
-		memmove(at, at + stride, stride * (size_t)(n - 1));
+		for (int r = cur_row; r < win_rows - 1; r++)
+			backing_row_copy(r, r + 1);
 	const int blank = insert ? cur_row : win_rows - 1;
 	for (int c = 0; c < win_cols; c++)
 		put_cell(c, blank, ' ', CONSOLE_ATTR);
