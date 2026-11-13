@@ -34,7 +34,7 @@
 # firmware build never touches and which therefore rot unnoticed -- one
 # case sat red for weeks until an unrelated change happened to run them.
 #
-# Mark's cmake-build-* trees (including *-atfe-22) are deliberately NOT
+# Mark's cmake-build-* trees (including *-atfe-23) are deliberately NOT
 # touched: they are his, and this script is the agent's.
 
 set -u
@@ -89,8 +89,12 @@ tree_compiler_ok() {
 }
 
 for t in $FW_TREES; do
+	# A missing tree FAILS the run. It used to be skipped, so with every
+	# tree deleted (as after a toolchain upgrade, before reconfiguring)
+	# the script built no firmware at all and still reported success.
 	if [ ! -d "$t" ]; then
-		note "$t" "ABSENT - skipped"
+		note "$t" "ABSENT - not built"
+		fail=1
 		continue
 	fi
 	if ! tree_compiler_ok "$t"; then
@@ -122,7 +126,10 @@ if [ -d build-tests ]; then
 	fi
 	rm -f /tmp/rb.$$.log
 else
-	note "build-tests (parser)" "ABSENT - configure it"
+	# Fails the run, as a missing firmware tree does: a suite that is not
+	# there has not passed.
+	note "build-tests (parser)" "ABSENT - cmake -S tests -B build-tests"
+	fail=1
 fi
 
 # --- usim: the simulator's copy of the portable renderer ------------------
