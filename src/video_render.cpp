@@ -100,6 +100,11 @@ static inline uint8_t attr_to_bg(uint8_t attr)
  * way the pointer could go stale. */
 static const uint8_t *font_face;
 static uint32_t       font_face_len;
+
+/* What a NULL font_face draws: the built-in table, or the face a host
+ * terminal has put in its place (vidterm_set_default_font). */
+static const uint8_t *default_face;
+static uint32_t       default_face_len;
 static bool           text_bold;
 
 /* Which buffer each selection came from, so a kill can drop it. */
@@ -119,6 +124,12 @@ void vidterm_set_font(const uint8_t *data, uint32_t len)
 {
     font_face = data;
     font_face_len = len;
+}
+
+void vidterm_set_default_font(const uint8_t *data, uint32_t len)
+{
+    default_face = data;
+    default_face_len = (data != NULL) ? len : 0u;
 }
 
 /* Called when a buffer is killed: if either selection came from it, put that
@@ -175,14 +186,17 @@ static inline uint8_t font_row(uint8_t ch, int row)
     const int r = row & (CHAR_H - 1);
     uint8_t v;
 
-    if (font_face != NULL) {
+    const uint8_t *face = (font_face != NULL) ? font_face : default_face;
+    const uint32_t len = (font_face != NULL) ? font_face_len : default_face_len;
+
+    if (face != NULL) {
         const uint32_t at = (uint32_t)ch * CHAR_H + (uint32_t)r;
 
         /* A short face cannot address every glyph. The ones it cannot reach
          * render BLANK rather than reading past the end of the buffer --
          * "undefined above" is how a buffer overrun gets written down as a
          * feature. */
-        v = (at < font_face_len) ? font_face[at] : 0u;
+        v = (at < len) ? face[at] : 0u;
     } else {
         v = font_8x16[ch][r];
     }

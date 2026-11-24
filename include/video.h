@@ -210,6 +210,15 @@ void vidterm_select_font(uint8_t group, uint8_t id);
 void vidterm_select_cursor(uint8_t group, uint8_t id);
 void vidterm_set_bold(bool on);
 
+/* The face that "the built-in one" stands for: buffer 0, a killed selection
+ * and a console reset all come back to it. It starts as the built-in Spleen
+ * face, and NULL restores that. The board never changes it; a host terminal
+ * compiling this renderer sets its user's chosen face here, in the same
+ * layout as a loaded face (a short face leaves the glyphs past its end
+ * blank). Text already drawn is not redrawn: the caller marks it dirty if it
+ * should change. */
+void vidterm_set_default_font(const uint8_t *data, uint32_t len);
+
 /* Flood fill. vidterm_flood_fill() runs to completion. The link's console
  * instead STARTS one and continues it a slice per render pass, because a
  * large fill costs more than a frame: start() returns true when work is
